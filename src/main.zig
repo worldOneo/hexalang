@@ -322,15 +322,63 @@ const Compiler = struct {
     machinecode: std.ArrayList(u8),
     jmpfixes: std.ArrayList(JmpFix),
     jmplabelmap: std.AutoHashMap(u64, u64),
+
+    fn new(allocator: std.mem.Allocator, ir: *std.ArrayList(IR)) Compiler {
+        return Compiler{
+            .ir = ir,
+            .machinecode = std.ArrayList(u8).init(allocator),
+            .jmpfixes = std.ArrayList(JmpFix).init(allocator),
+            .jmplabelmap = std.AutoHashMap(u64, u64).init(allocator),
+        };
+    }
+
+    fn compile(compiler: *Compiler) !void {
+        for (compiler.ir.items) |ir| {
+            switch (ir) {
+                IR.Label => |label| {
+                    try compiler.jmplabelmap.put(label.name, compiler.machinecode.items.len);
+                },
+                else => {
+                    var fix = try comp(ir, &compiler.machinecode);
+                    if (fix) |fixat| {
+                        try compiler.jmpfixes.append(fixat);
+                    }
+                },
+            }
+        }
+    }
+
+    fn machinecodesize(compiler: *Compiler) u64 {
+        return compiler.machinecode.items.len;
+    }
+
+    fn fixToBaseLocation(compiler: *Compiler, base: u64) void {
+        for (compiler.jmpfixes.items) |fix| {
+            fixjmp(&fix, base + (compiler.jmplabelmap.get(fix.label) orelse unreachable), &compiler.machinecode);
+        }
+    }
 };
 
-fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
+fn fixjmp(jmpfix: *const Compiler.JmpFix, location: u64, code: *std.ArrayList(u8)) void {
+    code.items[jmpfix.fixat + 0] = 0x49; // REX.WB
+    code.items[jmpfix.fixat + 1] = 0xbf; // MOVABS r15
+    var num = @as(*const [8]u8, @ptrCast(&location)).*;
+    code.items[jmpfix.fixat + 2] = num[0];
+    code.items[jmpfix.fixat + 3] = num[1];
+    code.items[jmpfix.fixat + 4] = num[2];
+    code.items[jmpfix.fixat + 5] = num[3];
+    code.items[jmpfix.fixat + 6] = num[4];
+    code.items[jmpfix.fixat + 7] = num[5];
+    code.items[jmpfix.fixat + 8] = num[6];
+    code.items[jmpfix.fixat + 9] = num[7];
+}
+
+fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
     const MOV_RR_MR: u8 = 0x89;
     const MOV_RR_RM: u8 = 0x8B;
 
-    const PUSH_RAX: u8 = 0x50;
-    const POP_RAX: u8 = 0x58;
     const RBP: u8 = 0b101;
+    const R15: u8 = 0b1111;
     switch (ir) {
         IR.Copy => |cvalue| {
             var value = cvalue;
@@ -344,7 +392,7 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
             }
 
             // pick RegReg, RegMem, MemReg, or MemMem move
-            if (value.from < 14 and value.to < 14) {
+            if (value.from < 13 and value.to < 13) {
                 var rex = REX.new().op64bit();
 
                 if (value.from > 7) {
@@ -353,43 +401,37 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
                 if (value.to > 7) {
                     rex = rex.extRMandSIBBase();
                 }
-                if (value.to > 16 or value.from > 16) {
-                    @panic("more than 16 regs not yet supported");
-                }
                 _ = try X64InstructionBuilder(1).new()
                     .rex(rex)
                     .inst(.{MOV_RR_RM})
                     .modRM(ModRM.new().reg(@intCast(value.to)).rm(@intCast(value.from)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
                     .finish(out);
-            } else if (value.from >= 14 and value.to >= 14) {
+            } else if (value.from >= 13 and value.to >= 13) {
                 // ugly mem-mem case
-                var offset_from = (value.from - 14) * 8;
-                var offset_to = (value.to - 14) * 8;
-                try out.append(PUSH_RAX);
+                var offset_from = (value.from - 13) * 8;
+                var offset_to = (value.to - 13) * 8;
 
-                // MOV rax, [rsp - x]
+                // MOV r15, [rsp - x]
                 _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit())
+                    .rex(REX.new().op64bit().extReg())
                     .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(0).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
+                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
                     .nosib()
                     .disp32(-@as(i32, @intCast(offset_from)), out);
 
-                // MOV [rsp - y], rax
+                // MOV [rsp - y], r15
                 _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit())
+                    .rex(REX.new().op64bit().extReg())
                     .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(0).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
+                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
                     .nosib()
                     .disp32(-@as(i32, @intCast(offset_to)), out);
-
-                try out.append(POP_RAX);
-            } else if (value.from < 14) {
+            } else if (value.from < 13) {
                 var rex = REX.new().op64bit();
                 if (value.from > 7) {
                     rex = rex.extReg();
                 }
-                var offset_to = (value.to - 14) * 8;
+                var offset_to = (value.to - 13) * 8;
                 // MOV [rsp - y], rax
                 _ = try X64InstructionBuilder(1).new()
                     .rex(rex)
@@ -402,7 +444,7 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
                 if (value.to > 7) {
                     rex = rex.extReg();
                 }
-                var offset_from = (value.from - 14) * 8;
+                var offset_from = (value.from - 13) * 8;
                 // MOV rax, MOV [rsp - y]
                 _ = try X64InstructionBuilder(1).new()
                     .rex(rex)
@@ -412,8 +454,23 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
                     .disp32(-@as(i32, @intCast(offset_from)), out);
             }
         },
+        IR.Jmp => |cvalue| {
+            var value = cvalue;
+            var offset = out.items.len;
+
+            try out.appendSlice(&[_]u8{
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
+                0x41, 0xff, 0x27, // jmp [r15]
+            });
+
+            return Compiler.JmpFix{
+                .fixat = offset,
+                .label = value.label,
+            };
+        },
         else => @panic("Not yet supported"),
     }
+    return null;
 }
 
 fn compile(allocator: std.mem.Allocator, relative_offset: u64) !std.ArrayList(u8) {
@@ -433,11 +490,20 @@ pub fn main() !void {
     // std.mem.copy(u8, buff, &code);
     // var fun: *fn (i32) i32 = @ptrCast(buff);
     // std.debug.print("{}\n", .{fun(10)});
-    var bin: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.page_allocator);
-    try comp(.{ .Copy = .{ .from = 7, .to = 8 } }, &bin);
-    var data = bin.items;
-    for (data) |item| {
-        std.debug.print("{x} ", .{item});
+    var ir: std.ArrayList(IR) = std.ArrayList(IR).init(std.heap.page_allocator);
+    try ir.append(.{ .Label = .{ .name = 1 } });
+    try ir.append(.{ .Copy = .{ .from = 7, .to = 8 } });
+    try ir.append(.{ .Copy = .{ .from = 123, .to = 8 } });
+    try ir.append(.{ .Copy = .{ .from = 123, .to = 1234 } });
+    try ir.append(.{ .Copy = .{ .from = 7, .to = 123 } });
+    try ir.append(.{ .Jmp = .{ .label = 1 } });
+
+    var compiler = Compiler.new(std.heap.page_allocator, &ir);
+    try compiler.compile();
+    compiler.fixToBaseLocation(1234);
+
+    for (compiler.machinecode.items) |item| {
+        std.debug.print("{x:0>2} ", .{item});
     }
     std.debug.print("\n", .{});
 }
