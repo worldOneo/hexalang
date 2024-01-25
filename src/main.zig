@@ -1,22 +1,38 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 fn alloc(size: usize) ![]u8 {
-    var buff = try std.os.windows.VirtualAlloc(
-        null,
-        size,
-        std.os.windows.MEM_COMMIT,
-        std.os.windows.PAGE_READWRITE,
-    );
+    if (builtin.os.tag == .windows) {
+        var buff = try std.os.windows.VirtualAlloc(
+            null,
+            size,
+            std.os.windows.MEM_COMMIT,
+            std.os.windows.PAGE_READWRITE,
+        );
 
-    var nothing: u32 = 0;
-    try std.os.windows.VirtualProtect(
-        buff,
-        size,
-        std.os.windows.PAGE_EXECUTE_READWRITE,
-        &nothing,
-    );
-    var ptr: [*]u8 = @ptrCast(buff);
-    return ptr[0..size];
+        var nothing: u32 = 0;
+        try std.os.windows.VirtualProtect(
+            buff,
+            size,
+            std.os.windows.PAGE_EXECUTE_READWRITE,
+            &nothing,
+        );
+        var ptr: [*]u8 = @ptrCast(buff);
+        return ptr[0..size];
+    } else if (builtin.os.tag == .linux) {
+        var buff = std.os.linux.mmap(
+            null,
+            size,
+            std.os.linux.PROT.EXEC | std.os.linux.PROT.READ | std.os.linux.PROT.WRITE,
+            std.os.linux.MAP.ANONYMOUS | std.os.linux.MAP.PRIVATE,
+            -1,
+            0,
+        );
+        if (buff == 0) {
+            return error.AllocFailed;
+        }
+        return @as([*]u8, @ptrFromInt(buff))[0..size];
+    }
 }
 
 const IR = union(enum) {
@@ -316,6 +332,20 @@ const Compiler = struct {
     const JmpFix = struct {
         label: u64,
         fixat: u64,
+
+        fn fixjmp(jmpfix: *const Compiler.JmpFix, location: u64, code: *std.ArrayList(u8)) void {
+            code.items[jmpfix.fixat + 0] = 0x49; // REX.WB
+            code.items[jmpfix.fixat + 1] = 0xbf; // MOVABS r15
+            var num = @as(*const [8]u8, @ptrCast(&location)).*;
+            code.items[jmpfix.fixat + 2] = num[0];
+            code.items[jmpfix.fixat + 3] = num[1];
+            code.items[jmpfix.fixat + 4] = num[2];
+            code.items[jmpfix.fixat + 5] = num[3];
+            code.items[jmpfix.fixat + 6] = num[4];
+            code.items[jmpfix.fixat + 7] = num[5];
+            code.items[jmpfix.fixat + 8] = num[6];
+            code.items[jmpfix.fixat + 9] = num[7];
+        }
     };
 
     ir: *std.ArrayList(IR),
@@ -354,24 +384,10 @@ const Compiler = struct {
 
     fn fixToBaseLocation(compiler: *Compiler, base: u64) void {
         for (compiler.jmpfixes.items) |fix| {
-            fixjmp(&fix, base + (compiler.jmplabelmap.get(fix.label) orelse unreachable), &compiler.machinecode);
+            fix.fixjmp(base + (compiler.jmplabelmap.get(fix.label) orelse unreachable), &compiler.machinecode);
         }
     }
 };
-
-fn fixjmp(jmpfix: *const Compiler.JmpFix, location: u64, code: *std.ArrayList(u8)) void {
-    code.items[jmpfix.fixat + 0] = 0x49; // REX.WB
-    code.items[jmpfix.fixat + 1] = 0xbf; // MOVABS r15
-    var num = @as(*const [8]u8, @ptrCast(&location)).*;
-    code.items[jmpfix.fixat + 2] = num[0];
-    code.items[jmpfix.fixat + 3] = num[1];
-    code.items[jmpfix.fixat + 4] = num[2];
-    code.items[jmpfix.fixat + 5] = num[3];
-    code.items[jmpfix.fixat + 6] = num[4];
-    code.items[jmpfix.fixat + 7] = num[5];
-    code.items[jmpfix.fixat + 8] = num[6];
-    code.items[jmpfix.fixat + 9] = num[7];
-}
 
 fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
     const MOV_RR_MR: u8 = 0x89;
@@ -486,7 +502,8 @@ pub fn main() !void {
         0xC3, // ret
     };
     _ = code;
-    // var buff = try alloc(100);
+    var buff = try alloc(100);
+    _ = buff;
     // std.mem.copy(u8, buff, &code);
     // var fun: *fn (i32) i32 = @ptrCast(buff);
     // std.debug.print("{}\n", .{fun(10)});
