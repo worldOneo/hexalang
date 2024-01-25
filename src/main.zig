@@ -34,6 +34,10 @@ const IR = union(enum) {
     Label: struct {
         name: u64,
     },
+    FnEpilogue,
+    FnPrologue: struct {
+        registers: u64,
+    },
 };
 
 // Who thought RAX, RCX, RDX, RBX is the right order?
@@ -225,6 +229,10 @@ fn X64InstructionBuilder(comptime len: comptime_int) type {
                 disper.bundle.sib = s.byte();
                 return disper;
             }
+
+            fn nosib(siber: *const Siber) Disper {
+                return .{ .bundle = siber.bundle };
+            }
         };
 
         const Disper = struct {
@@ -304,24 +312,17 @@ fn X64InstructionBuilder(comptime len: comptime_int) type {
     };
 }
 
-fn encodeModRMSIBOffsetToRSP(reg: u8, offset: i32) [6]u8 {
-    var modrm = ModRM.new()
-        .mode(ModRM.Mode.SIB_DISP32)
-        .reg(reg)
-        .rm(0b100) // RSP
-        .byte();
-    var inst = modrm;
-    var sib: u8 = SIB.nothing().byte();
-    var disp32: [4]u8 = @as(*[4]u8, @constCast(@ptrCast(&offset))).*; // every machine uses twos complement, right?
-    return [6]u8{
-        inst,
-        sib,
-        disp32[0],
-        disp32[1],
-        disp32[2],
-        disp32[3],
+const Compiler = struct {
+    const JmpFix = struct {
+        label: u64,
+        fixat: u64,
     };
-}
+
+    ir: *std.ArrayList(IR),
+    machinecode: std.ArrayList(u8),
+    jmpfixes: std.ArrayList(JmpFix),
+    jmplabelmap: std.AutoHashMap(u64, u64),
+};
 
 fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
     const MOV_RR_MR: u8 = 0x89;
@@ -329,6 +330,7 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
 
     const PUSH_RAX: u8 = 0x50;
     const POP_RAX: u8 = 0x58;
+    const RBP: u8 = 0b101;
     switch (ir) {
         IR.Copy => |cvalue| {
             var value = cvalue;
@@ -345,10 +347,10 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
             if (value.from < 14 and value.to < 14) {
                 var rex = REX.new().op64bit();
 
-                if (value.from > 8) {
+                if (value.from > 7) {
                     rex = rex.extReg();
                 }
-                if (value.to > 8) {
+                if (value.to > 7) {
                     rex = rex.extRMandSIBBase();
                 }
                 if (value.to > 16 or value.from > 16) {
@@ -357,7 +359,7 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
                 _ = try X64InstructionBuilder(1).new()
                     .rex(rex)
                     .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(@intCast(value.from)).rm(@intCast(value.to)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
+                    .modRM(ModRM.new().reg(@intCast(value.to)).rm(@intCast(value.from)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
                     .finish(out);
             } else if (value.from >= 14 and value.to >= 14) {
                 // ugly mem-mem case
@@ -369,36 +371,44 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !void {
                 _ = try X64InstructionBuilder(1).new()
                     .rex(REX.new().op64bit())
                     .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(0).rm(0b100).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
-                    .sib(SIB.nothing())
+                    .modRM(ModRM.new().reg(0).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
+                    .nosib()
                     .disp32(-@as(i32, @intCast(offset_from)), out);
 
                 // MOV [rsp - y], rax
                 _ = try X64InstructionBuilder(1).new()
                     .rex(REX.new().op64bit())
                     .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(0).rm(0b100).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
-                    .sib(SIB.nothing())
+                    .modRM(ModRM.new().reg(0).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
+                    .nosib()
                     .disp32(-@as(i32, @intCast(offset_to)), out);
 
                 try out.append(POP_RAX);
             } else if (value.from < 14) {
+                var rex = REX.new().op64bit();
+                if (value.from > 7) {
+                    rex = rex.extReg();
+                }
                 var offset_to = (value.to - 14) * 8;
                 // MOV [rsp - y], rax
                 _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit())
+                    .rex(rex)
                     .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(@intCast(value.from)).rm(0b100).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rsp-offset
-                    .sib(SIB.nothing())
+                    .modRM(ModRM.new().reg(@intCast(value.from)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rbp-offset <- <reg>
+                    .nosib()
                     .disp32(-@as(i32, @intCast(offset_to)), out);
             } else {
+                var rex = REX.new().op64bit();
+                if (value.to > 7) {
+                    rex = rex.extReg();
+                }
                 var offset_from = (value.from - 14) * 8;
-                // MOV [rsp - y], rax
+                // MOV rax, MOV [rsp - y]
                 _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit())
-                    .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(@intCast(value.to)).rm(0b100).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rsp-offset
-                    .sib(SIB.nothing())
+                    .rex(rex)
+                    .inst(.{MOV_RR_RM})
+                    .modRM(ModRM.new().reg(@intCast(value.to)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rbp-offset
+                    .nosib()
                     .disp32(-@as(i32, @intCast(offset_from)), out);
             }
         },
@@ -424,7 +434,7 @@ pub fn main() !void {
     // var fun: *fn (i32) i32 = @ptrCast(buff);
     // std.debug.print("{}\n", .{fun(10)});
     var bin: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.page_allocator);
-    try comp(.{ .Copy = .{ .from = 4, .to = 5 } }, &bin);
+    try comp(.{ .Copy = .{ .from = 7, .to = 8 } }, &bin);
     var data = bin.items;
     for (data) |item| {
         std.debug.print("{x} ", .{item});
