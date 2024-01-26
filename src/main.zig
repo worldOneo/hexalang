@@ -41,6 +41,7 @@ const IR = union(enum) {
         to: u64,
     },
     Add: struct {
+        dest: u64,
         left: u64,
         right: u64,
     },
@@ -328,6 +329,289 @@ fn X64InstructionBuilder(comptime len: comptime_int) type {
     };
 }
 
+const X64DestLeftRightBehaviour = enum {
+    MovLeftApplyRight,
+    ZeroDestApplyBoth,
+    OneDestApplyBoth,
+};
+
+const X64LeftRightBehaviour = enum {
+    ClearR15,
+    MovLeft,
+    Dirty,
+};
+
+fn X64IrToInstructionBuilder(comptime len: comptime_int) type {
+    const MaxReg = 14;
+    return struct {
+        fn left_and_right(creg: u64, crm: u64, behaviour: X64LeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
+            var reg = creg;
+            var rm = crm;
+
+            // Ignore RSP+RBP
+            if (reg > 3) {
+                reg += 2;
+            }
+            if (rm > 3) {
+                rm += 2;
+            }
+
+            try left_and_right0(reg, rm, behaviour, inst_rm, inst_mr, out);
+        }
+
+        fn left_and_right0(creg: u64, crm: u64, behaviour: X64LeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
+            var reg = creg;
+            var rm = crm;
+            const MOV_RR_RM: u8 = 0x8B;
+            const RBP: u8 = 0b101;
+            const R15: u8 = 0b1111;
+            // pick RegReg, RegMem, MemReg, or MemMem move
+            if (reg <= MaxReg and rm <= MaxReg) {
+                var rex = REX.new().op64bit();
+
+                if (reg > 7) {
+                    rex = rex.extReg();
+                }
+                if (rm > 7) {
+                    rex = rex.extRMandSIBBase();
+                }
+                _ = try X64InstructionBuilder(1).new()
+                    .rex(rex)
+                    .inst(inst_rm)
+                    .modRM(ModRM.new().reg(@intCast(reg)).rm(@intCast(rm)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
+                    .finish(out);
+            } else if (reg > MaxReg and rm > MaxReg) {
+
+                // ugly mem-mem case
+                var offset_from = (reg - MaxReg) * 8;
+                var offset_to = (rm - MaxReg) * 8;
+
+                if (behaviour == .ClearR15) {
+                    try out.appendSlice(&[_]u8{ 0x4D, 0x31, 0xFF }); // xor r15,r15
+                } else if (behaviour == .MovLeft) {
+                    // mov r15, [rsp - x]
+                    _ = try X64InstructionBuilder(1).new()
+                        .rex(REX.new().op64bit().extReg())
+                        .inst(.{MOV_RR_RM})
+                        .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(offset_from)), out);
+                } else if (behaviour == .Dirty) {
+                    // inst r15, [rsp - x]
+                    _ = try X64InstructionBuilder(len).new()
+                        .rex(REX.new().op64bit().extReg())
+                        .inst(inst_rm)
+                        .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(offset_from)), out);
+                }
+
+                // inst [rsp - y], r15
+                _ = try X64InstructionBuilder(len).new()
+                    .rex(REX.new().op64bit().extReg())
+                    .inst(inst_mr)
+                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(offset_to)), out);
+            } else if (reg <= MaxReg) {
+                var rex = REX.new().op64bit();
+                if (reg > 7) {
+                    rex = rex.extReg();
+                }
+                var offset_to = (rm - MaxReg) * 8;
+                // inst [rsp - y], rax
+                _ = try X64InstructionBuilder(1).new()
+                    .rex(rex)
+                    .inst(inst_rm)
+                    .modRM(ModRM.new().reg(@intCast(reg)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rbp-offset <- <reg>
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(offset_to)), out);
+            } else {
+                var rex = REX.new().op64bit();
+                if (rm > 7) {
+                    rex = rex.extReg();
+                }
+                var offset_from = (reg - MaxReg) * 8;
+                // inst rax, MOV [rsp - y]
+                _ = try X64InstructionBuilder(len).new()
+                    .rex(rex)
+                    .inst(inst_mr)
+                    .modRM(ModRM.new().reg(@intCast(rm)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rbp-offset
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(offset_from)), out);
+            }
+        }
+
+        fn dest_left_right(cdest: u64, creg: u64, crm: u64, behaviour: X64DestLeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
+            var dest = cdest;
+            var reg = creg;
+            var rm = crm;
+            const RBP: u8 = 0b101;
+            const R15: u8 = 0b1111;
+
+            const MOV_MIMM8: u8 = 0xC6;
+            const MOV_RR_MR: u8 = 0x89;
+            const MOV_RR_RM: u8 = 0x8B;
+
+            // Ignore RSP+RBP
+            if (reg > 3) {
+                reg += 2;
+            }
+            if (rm > 3) {
+                rm += 2;
+            }
+            if (dest > 3) {
+                dest += 2;
+            }
+
+            if (behaviour == .MovLeftApplyRight) {
+                try @This().left_and_right0(dest, reg, .Dirty, .{MOV_RR_RM}, .{MOV_RR_MR}, out);
+            } else if (behaviour == .OneDestApplyBoth or behaviour == .ZeroDestApplyBoth) {
+                var disp: u8 = if (behaviour == .OneDestApplyBoth) 1 else 0;
+                if (dest <= MaxReg) {
+                    var rex = REX.new().op64bit();
+                    if (dest > 7) {
+                        rex = rex.extReg();
+                    }
+                    _ = try X64InstructionBuilder(1)
+                        .new()
+                        .rex(rex)
+                        .inst(.{MOV_MIMM8})
+                        .modRM(ModRM.new().rm(@intCast(dest)).mode(ModRM.Mode.RM))
+                        .nosib()
+                        .disp32(disp, out); // this is abusive
+                } else {
+                    var offset = (dest - MaxReg) * 8;
+                    _ = try X64InstructionBuilder(1)
+                        .new()
+                        .norex()
+                        .inst(.{MOV_MIMM8})
+                        .modRM(ModRM.new().rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                        .sib(SIB.nothing())
+                        .disp32(-@as(i32, @intCast(offset)), out);
+                    try out.append(disp);
+                }
+            }
+
+            // apply left
+            if (behaviour == .OneDestApplyBoth or behaviour == .ZeroDestApplyBoth) {
+                if (reg <= MaxReg and dest <= MaxReg) {
+                    var rex = REX.new().op64bit();
+                    if (reg > 7) {
+                        rex = rex.extRMandSIBBase();
+                    }
+                    if (dest > 7) {
+                        rex = rex.extReg();
+                    }
+                    _ = try X64InstructionBuilder(1).new()
+                        .rex(rex)
+                        .inst(inst_rm)
+                        .modRM(ModRM.new().reg(@intCast(dest)).rm(@intCast(reg)).mode(ModRM.Mode.RM))
+                        .finish(out);
+                } else if (reg <= MaxReg) {
+                    var rex = REX.new().op64bit();
+                    if (reg > 7) {
+                        rex = rex.extReg();
+                    }
+                    var offset = (dest - MaxReg) * 8;
+                    _ = try X64InstructionBuilder(1)
+                        .new()
+                        .rex(rex)
+                        .inst(inst_mr)
+                        .modRM(ModRM.new().reg(@intCast(reg)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(offset)), out);
+                } else if (dest <= MaxReg) {
+                    var rex = REX.new().op64bit();
+                    if (dest > 7) {
+                        rex = rex.extReg();
+                    }
+                    var offset = (reg - MaxReg) * 8;
+                    _ = try X64InstructionBuilder(1)
+                        .new()
+                        .rex(rex)
+                        .inst(inst_rm)
+                        .modRM(ModRM.new().reg(@intCast(dest)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(offset)), out);
+                } else {
+                    var reg_offset = (reg - MaxReg) * 8;
+                    var dest_offset = (dest - MaxReg) * 8;
+                    // mov r15, reg
+                    _ = try X64InstructionBuilder(1).new()
+                        .rex(REX.new().op64bit().extReg())
+                        .inst(.{MOV_RR_RM}).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(reg_offset)), out);
+                    // inst dest, r15
+                    _ = try X64InstructionBuilder(len).new()
+                        .rex(REX.new().op64bit().extReg())
+                        .inst(inst_mr).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                        .nosib()
+                        .disp32(-@as(i32, @intCast(dest_offset)), out);
+                }
+            }
+
+            // apply right
+            if (rm <= MaxReg and dest <= MaxReg) {
+                var rex = REX.new().op64bit();
+                if (rm > 7) {
+                    rex = rex.extRMandSIBBase();
+                }
+                if (dest > 7) {
+                    rex = rex.extReg();
+                }
+                _ = try X64InstructionBuilder(1).new()
+                    .rex(rex)
+                    .inst(inst_rm)
+                    .modRM(ModRM.new().reg(@intCast(dest)).rm(@intCast(rm)).mode(ModRM.Mode.RM))
+                    .finish(out);
+            } else if (rm <= MaxReg) {
+                var rex = REX.new().op64bit();
+                if (rm > 7) {
+                    rex = rex.extReg();
+                }
+                var offset = (dest - MaxReg) * 8;
+                _ = try X64InstructionBuilder(1)
+                    .new()
+                    .rex(rex)
+                    .inst(inst_mr)
+                    .modRM(ModRM.new().reg(@intCast(rm)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(offset)), out);
+            } else if (dest <= MaxReg) {
+                var rex = REX.new().op64bit();
+                if (dest > 7) {
+                    rex = rex.extReg();
+                }
+                var offset = (rm - MaxReg) * 8;
+                _ = try X64InstructionBuilder(1)
+                    .new()
+                    .rex(rex)
+                    .inst(inst_rm)
+                    .modRM(ModRM.new().reg(@intCast(dest)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(offset)), out);
+            } else {
+                var dest_offset = (dest - MaxReg) * 8;
+                var rm_offset = (rm - MaxReg) * 8;
+                // mov r15, reg
+                _ = try X64InstructionBuilder(1).new()
+                    .rex(REX.new().op64bit().extReg())
+                    .inst(.{MOV_RR_RM}).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(rm_offset)), out);
+                // inst dest, r15
+                _ = try X64InstructionBuilder(len).new()
+                    .rex(REX.new().op64bit().extReg())
+                    .inst(inst_mr).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
+                    .nosib()
+                    .disp32(-@as(i32, @intCast(dest_offset)), out);
+            }
+        }
+    };
+}
+
 const Compiler = struct {
     const JmpFix = struct {
         label: u64,
@@ -392,83 +676,22 @@ const Compiler = struct {
 fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
     const MOV_RR_MR: u8 = 0x89;
     const MOV_RR_RM: u8 = 0x8B;
+    const ADD_MR: u8 = 0x01;
+    const ADD_RM: u8 = 0x03;
 
     const RBP: u8 = 0b101;
-    const R15: u8 = 0b1111;
+    _ = RBP;
     switch (ir) {
         IR.Copy => |cvalue| {
             var value = cvalue;
-
-            // Ignore RSP+RBP
-            if (value.from > 3) {
-                value.from += 2;
-            }
-            if (value.to > 3) {
-                value.to += 2;
-            }
-
-            // pick RegReg, RegMem, MemReg, or MemMem move
-            if (value.from < 13 and value.to < 13) {
-                var rex = REX.new().op64bit();
-
-                if (value.from > 7) {
-                    rex = rex.extReg();
-                }
-                if (value.to > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(@intCast(value.to)).rm(@intCast(value.from)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
-                    .finish(out);
-            } else if (value.from >= 13 and value.to >= 13) {
-                // ugly mem-mem case
-                var offset_from = (value.from - 13) * 8;
-                var offset_to = (value.to - 13) * 8;
-
-                // MOV r15, [rsp - x]
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_from)), out);
-
-                // MOV [rsp - y], r15
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_to)), out);
-            } else if (value.from < 13) {
-                var rex = REX.new().op64bit();
-                if (value.from > 7) {
-                    rex = rex.extReg();
-                }
-                var offset_to = (value.to - 13) * 8;
-                // MOV [rsp - y], rax
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(@intCast(value.from)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rbp-offset <- <reg>
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_to)), out);
-            } else {
-                var rex = REX.new().op64bit();
-                if (value.to > 7) {
-                    rex = rex.extReg();
-                }
-                var offset_from = (value.from - 13) * 8;
-                // MOV rax, MOV [rsp - y]
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(@intCast(value.to)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rbp-offset
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_from)), out);
-            }
+            try X64IrToInstructionBuilder(1).left_and_right(
+                value.from,
+                value.to,
+                .Dirty,
+                .{MOV_RR_RM},
+                .{MOV_RR_MR},
+                out,
+            );
         },
         IR.Jmp => |cvalue| {
             var value = cvalue;
@@ -476,13 +699,36 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
 
             try out.appendSlice(&[_]u8{
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
-                0x41, 0xff, 0x27, // jmp [r15]
+                0x41, 0xff, 0xe7, // jmp r15
             });
 
             return Compiler.JmpFix{
                 .fixat = offset,
                 .label = value.label,
             };
+        },
+        IR.Add => |cvalue| {
+            var value = cvalue;
+            if (value.dest == value.left) {
+                try X64IrToInstructionBuilder(1).left_and_right(
+                    value.left,
+                    value.right,
+                    .MovLeft,
+                    .{ADD_RM},
+                    .{ADD_MR},
+                    out,
+                );
+            } else {
+                try X64IrToInstructionBuilder(1).dest_left_right(
+                    value.dest,
+                    value.left,
+                    value.right,
+                    X64DestLeftRightBehaviour.MovLeftApplyRight,
+                    .{ADD_RM},
+                    .{ADD_MR},
+                    out,
+                );
+            }
         },
         else => @panic("Not yet supported"),
     }
@@ -513,6 +759,11 @@ pub fn main() !void {
     try ir.append(.{ .Copy = .{ .from = 123, .to = 8 } });
     try ir.append(.{ .Copy = .{ .from = 123, .to = 1234 } });
     try ir.append(.{ .Copy = .{ .from = 7, .to = 123 } });
+    try ir.append(.{ .Add = .{ .dest = 1, .left = 1, .right = 2 } });
+    try ir.append(.{ .Add = .{ .dest = 133, .left = 134, .right = 233 } });
+    try ir.append(.{ .Add = .{ .dest = 133, .left = 133, .right = 233 } });
+    try ir.append(.{ .Add = .{ .dest = 33, .left = 3, .right = 153 } });
+    try ir.append(.{ .Add = .{ .dest = 3, .left = 456, .right = 123 } });
     try ir.append(.{ .Jmp = .{ .label = 1 } });
 
     var compiler = Compiler.new(std.heap.page_allocator, &ir);
