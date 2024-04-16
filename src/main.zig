@@ -61,10 +61,13 @@ const IR = union(enum) {
     Label: struct {
         name: u64,
     },
-    FnEpilogue,
+    FnEpilogue: struct {
+        registers: u64,
+    },
     FnPrologue: struct {
         registers: u64,
     },
+    Return,
 };
 
 // Who thought RAX, RCX, RDX, RBX is the right order?
@@ -744,6 +747,7 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
     const SUB_MR: u8 = 0x29;
 
     const RBP: u8 = 0b101;
+    const RSP: u8 = 0b100;
     const R15: u8 = 15;
     switch (ir) {
         IR.Copy => |cvalue| {
@@ -845,6 +849,37 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
             }
             try builder.copy_from_r15(value.dest, out);
         },
+        IR.FnPrologue => |cvalue| {
+            var value = cvalue;
+            try out.appendSlice(&[_]u8{
+                0x55, // push rbp
+                0x48, 0x89, 0xe5, // mov rbp, rsp
+            });
+            _ = try X64InstructionBuilder(1).new()
+                .rex(REX.new().op64bit()).inst(.{
+                0x81, // sub rsp, smthsmth with modrm.reg = 5
+            })
+                .modRM(ModRM.new().reg(5).rm(RSP).mode(ModRM.Mode.RM))
+                .nosib()
+                .disp32(@intCast((value.registers - X64IrToInstructionBuilder(0).MaxReg + 2) * 8), out);
+        },
+        IR.FnEpilogue => |cvalue| {
+            var value = cvalue;
+            _ = try X64InstructionBuilder(1).new()
+                .rex(REX.new().op64bit()).inst(.{
+                0x81, // add rsp, smthsmth with modrm.reg = 0
+            })
+                .modRM(ModRM.new().reg(0).rm(RSP).mode(ModRM.Mode.RM))
+                .nosib()
+                .disp32(@intCast((value.registers - X64IrToInstructionBuilder(0).MaxReg + 2) * 8), out);
+            try out.appendSlice(&[_]u8{
+                0x48, 0x89, 0xec, // mov rsp, rbp
+                0x5d, // pop rbp
+            });
+        },
+        IR.Return => {
+            try out.append(0xc3); // ret
+        },
         else => @panic("Not yet supported"),
     }
     return null;
@@ -864,32 +899,28 @@ pub fn main() !void {
     };
     _ = code;
     var buff = try alloc(100);
-    _ = buff;
+    // var disp: i32 = 984;
+    // std.debug.print("{}\n", .{@as(*const [4]u8, @ptrCast(&disp))[1]});
     // std.mem.copy(u8, buff, &code);
     // var fun: *fn (i32) i32 = @ptrCast(buff);
     // std.debug.print("{}\n", .{fun(10)});
     var ir: std.ArrayList(IR) = std.ArrayList(IR).init(std.heap.page_allocator);
     try ir.append(.{ .Label = .{ .name = 1 } });
-    try ir.append(.{ .Copy = .{ .from = 7, .to = 8 } });
-    try ir.append(.{ .Copy = .{ .from = 123, .to = 8 } });
-    try ir.append(.{ .Copy = .{ .from = 123, .to = 1234 } });
-    try ir.append(.{ .Copy = .{ .from = 7, .to = 123 } });
-    try ir.append(.{ .Add = .{ .dest = 1, .left = 1, .right = 2 } });
-    try ir.append(.{ .Add = .{ .dest = 133, .left = 134, .right = 233 } });
-    try ir.append(.{ .Add = .{ .dest = 133, .left = 133, .right = 233 } });
-    try ir.append(.{ .Add = .{ .dest = 33, .left = 3, .right = 153 } });
-    try ir.append(.{ .Add = .{ .dest = 3, .left = 456, .right = 123 } });
-    try ir.append(.{ .Sub = .{ .dest = 3, .left = 3, .right = 123 } });
-    try ir.append(.{ .Mul = .{ .dest = 123, .left = 234, .right = 456 } });
-    try ir.append(.{ .Mul = .{ .dest = 12, .left = 2, .right = 4 } });
-    try ir.append(.{ .Jmp = .{ .label = 1 } });
+    try ir.append(.{ .FnPrologue = .{ .registers = 123 } });
+    try ir.append(.{ .FnEpilogue = .{ .registers = 123 } });
+    try ir.append(.Return);
 
     var compiler = Compiler.new(std.heap.page_allocator, &ir);
     try compiler.compile();
     compiler.fixToBaseLocation(1234);
 
-    for (compiler.machinecode.items) |item| {
+    @memset(buff, 0);
+    std.mem.copy(u8, buff, compiler.machinecode.items);
+    for (buff) |item| {
         std.debug.print("{x:0>2} ", .{item});
     }
     std.debug.print("\n", .{});
+    var f: *fn () i32 = @ptrCast(buff);
+    _ = f();
+    std.debug.print("Worked\n", .{});
 }
