@@ -36,6 +36,10 @@ fn alloc(size: usize) ![]u8 {
 }
 
 const IR = union(enum) {
+    Set: struct {
+        dest: u64,
+        value: u64,
+    },
     Copy: struct {
         from: u64,
         to: u64,
@@ -69,613 +73,6 @@ const IR = union(enum) {
     },
     Return,
 };
-
-// Who thought RAX, RCX, RDX, RBX is the right order?
-// It should be RAX, RBX, RCX, RDX ofc...
-const X86_64_REG_REMAPPING = [_]u8{ 0, 3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-
-const ModRM = struct {
-    const Mode = enum(u8) {
-        SIB = 0b00000000,
-        SIB_DISP8 = 0b01000000,
-        SIB_DISP32 = 0b10000000,
-        RM = 0b11000000,
-    };
-
-    data: u8,
-
-    fn new() ModRM {
-        return .{ .data = 0 };
-    }
-
-    fn mode(modrm: *const ModRM, m: Mode) ModRM {
-        return .{ .data = (modrm.data & 0b00111111) | @intFromEnum(m) };
-    }
-
-    fn reg(modrm: *const ModRM, r: u8) ModRM {
-        return .{ .data = (modrm.data & 0b11000111) | ((X86_64_REG_REMAPPING[r] & 0b111) << 3) };
-    }
-
-    fn rm(modrm: *const ModRM, r: u8) ModRM {
-        return .{ .data = (modrm.data & 0b11111000) | (X86_64_REG_REMAPPING[r] & 0b111) };
-    }
-
-    fn byte(modrm: *const ModRM) u8 {
-        return modrm.data;
-    }
-};
-
-fn encodeModRM(reg: u8, rm: u8) u8 {
-    return ModRM.new()
-        .mode(ModRM.Mode.RM)
-        .reg(reg)
-        .rm(rm)
-        .byte();
-}
-
-const SIB = struct {
-    const Scale = enum(u8) {
-        TIMES1 = 0b00000000,
-        TIMES2 = 0b01000000,
-        TIMES4 = 0b10000000,
-        TIMES8 = 0b11000000,
-    };
-
-    data: u8,
-
-    fn new() SIB {
-        return .{ .data = 0 };
-    }
-    fn nothing() SIB {
-        return .{ .data = 0b00100100 }; // rsp + rsp*1 = nothing apparently
-    }
-
-    fn scale(sib: *const SIB, s: Scale) SIB {
-        return .{ .data = (sib.data & 0b00111111) | @intFromEnum(s) };
-    }
-
-    fn index(sib: *const SIB, r: u8) SIB {
-        return .{ .data = (sib.data & 0b11000111) | ((X86_64_REG_REMAPPING[r] & 0b111) << 3) };
-    }
-
-    fn base(sib: *const SIB, r: u8) SIB {
-        return .{ .data = (sib.data & 0b11111000) | (X86_64_REG_REMAPPING[r]) };
-    }
-
-    fn byte(sib: *const SIB) u8 {
-        return sib.data;
-    }
-};
-
-const REX = struct {
-    const Flag = enum(u8) {
-        W = 0b00001000, // 64bit operand size
-        R = 0b00000100, // Extended MODRM.reg
-        X = 0b00000010, // Extend SIB.index
-        B = 0b00000001, // Extended MODRM.rm
-    };
-    const PREF_64B: u8 = 0b01000000; // REX prefix
-
-    data: u8,
-
-    fn new() REX {
-        return .{ .data = PREF_64B };
-    }
-
-    fn op64bit(r: *const REX) REX {
-        return .{ .data = r.data | @intFromEnum(Flag.W) };
-    }
-
-    fn extReg(r: *const REX) REX {
-        return .{ .data = r.data | @intFromEnum(Flag.R) };
-    }
-
-    fn extSIBIndex(r: *const REX) REX {
-        return .{ .data = r.data | @intFromEnum(Flag.X) };
-    }
-
-    fn extRMandSIBBase(r: *REX) REX {
-        return .{ .data = r.data | @intFromEnum(Flag.B) };
-    }
-
-    fn byte(r: *const REX) u8 {
-        return r.data;
-    }
-};
-
-fn X64InstructionBuilder(comptime len: comptime_int) type {
-    return struct {
-        const Bundle = struct {
-            rex: ?u8 = null,
-            inst: ?[len]u8 = null,
-            modrm: ?u8 = null,
-            sib: ?u8 = null,
-        };
-        const Rexer = struct {
-            fn rex(_: *const Rexer, r: REX) Inster {
-                return .{ .bundle = .{ .rex = r.byte() } };
-            }
-
-            fn norex(_: *const Rexer) Inster {
-                return .{};
-            }
-        };
-
-        const Inster = struct {
-            bundle: Bundle = .{},
-
-            fn inst(inster: *const Inster, i: [len]u8) Modrmer {
-                var m: Modrmer = .{ .bundle = inster.bundle };
-                m.bundle.inst = i;
-                return m;
-            }
-        };
-
-        const Modrmer = struct {
-            bundle: Bundle = .{},
-
-            fn finish(mrm: *const Modrmer, out: *std.ArrayList(u8)) !u64 {
-                var size: u64 = 0;
-                if (mrm.bundle.rex) |rex| {
-                    try out.append(rex);
-                    size += 1;
-                }
-                if (mrm.bundle.inst) |inst| {
-                    try out.appendSlice(&inst);
-                    size += len;
-                }
-                return size;
-            }
-
-            fn modRM(mrm: *const Modrmer, rm: ModRM) Siber {
-                var siber: Siber = .{ .bundle = mrm.bundle };
-                siber.bundle.modrm = rm.byte();
-                return siber;
-            }
-        };
-
-        const Siber = struct {
-            bundle: Bundle = .{},
-
-            fn finish(siber: *const Siber, out: *std.ArrayList(u8)) !u64 {
-                var size: u64 = 0;
-                if (siber.bundle.rex) |rex| {
-                    try out.append(rex);
-                    size += 1;
-                }
-                if (siber.bundle.inst) |inst| {
-                    try out.appendSlice(&inst);
-                    size += len;
-                }
-                if (siber.bundle.modrm) |mrm| {
-                    try out.append(mrm);
-                    size += 1;
-                }
-                return size;
-            }
-
-            fn sib(siber: *const Siber, s: SIB) Disper {
-                var disper: Disper = .{ .bundle = siber.bundle };
-                disper.bundle.sib = s.byte();
-                return disper;
-            }
-
-            fn nosib(siber: *const Siber) Disper {
-                return .{ .bundle = siber.bundle };
-            }
-        };
-
-        const Disper = struct {
-            bundle: Bundle,
-
-            fn finish(disper: *const Disper, out: *std.ArrayList(u8)) !u64 {
-                var size: u64 = 0;
-                if (disper.bundle.rex) |rex| {
-                    try out.append(rex);
-                    size += 1;
-                }
-                if (disper.bundle.inst) |inst| {
-                    try out.appendSlice(&inst);
-                    size += len;
-                }
-                if (disper.bundle.modrm) |mrm| {
-                    try out.append(mrm);
-                    size += 1;
-                }
-                if (disper.bundle.sib) |sib| {
-                    try out.append(sib);
-                    size += 1;
-                }
-                return size;
-            }
-
-            fn disp8(disper: *const Disper, disp: i8, out: *std.ArrayList(u8)) !u64 {
-                var size: u64 = 0;
-                if (disper.bundle.rex) |rex| {
-                    try out.append(rex);
-                    size += 1;
-                }
-                if (disper.bundle.inst) |inst| {
-                    try out.appendSlice(&inst);
-                    size += len;
-                }
-                if (disper.bundle.modrm) |mrm| {
-                    try out.append(mrm);
-                    size += 1;
-                }
-                if (disper.bundle.sib) |sib| {
-                    try out.append(sib);
-                    size += 1;
-                }
-                try out.append(@as(*u8, @ptrCast(&disp)).*);
-                size += 1;
-                return size;
-            }
-
-            fn disp32(disper: *const Disper, disp: i32, out: *std.ArrayList(u8)) !u64 {
-                var size: u64 = 0;
-                if (disper.bundle.rex) |rex| {
-                    try out.append(rex);
-                    size += 1;
-                }
-                if (disper.bundle.inst) |inst| {
-                    try out.appendSlice(&inst);
-                    size += len;
-                }
-                if (disper.bundle.modrm) |mrm| {
-                    try out.append(mrm);
-                    size += 1;
-                }
-                if (disper.bundle.sib) |sib| {
-                    try out.append(sib);
-                    size += 1;
-                }
-                try out.appendSlice(&(@as(*const [4]u8, @ptrCast(&disp)).*));
-                size += 4;
-                return size;
-            }
-        };
-
-        fn new() Rexer {
-            return .{};
-        }
-    };
-}
-
-const X64DestLeftRightBehaviour = enum {
-    MovLeftApplyRight,
-    ZeroDestApplyBoth,
-    OneDestApplyBoth,
-};
-
-const X64LeftRightBehaviour = enum {
-    ClearR15,
-    MovLeft,
-    Dirty,
-};
-
-fn X64IrToInstructionBuilder(comptime len: comptime_int) type {
-    return struct {
-        const RBP: u8 = 0b101;
-        const R15: u8 = 0b1111;
-
-        const MaxReg = 14;
-        const MOV_MIMM8: u8 = 0xC6;
-        const MOV_RR_MR: u8 = 0x89;
-        const MOV_RR_RM: u8 = 0x8B;
-
-        fn left_and_right(creg: u64, crm: u64, behaviour: X64LeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
-            var reg = creg;
-            var rm = crm;
-
-            // Ignore RSP+RBP
-            if (reg > 3) {
-                reg += 2;
-            }
-            if (rm > 3) {
-                rm += 2;
-            }
-
-            try left_and_right0(reg, rm, behaviour, inst_rm, inst_mr, out);
-        }
-
-        fn left_and_right0(creg: u64, crm: u64, behaviour: X64LeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
-            var reg = creg;
-            var rm = crm;
-            // pick RegReg, RegMem, MemReg, or MemMem move
-            if (reg <= MaxReg and rm <= MaxReg) {
-                var rex = REX.new().op64bit();
-
-                if (reg > 7) {
-                    rex = rex.extReg();
-                }
-                if (rm > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(inst_rm)
-                    .modRM(ModRM.new().reg(@intCast(reg)).rm(@intCast(rm)).mode(ModRM.Mode.RM)) // <reg> <- <reg>
-                    .finish(out);
-            } else if (reg > MaxReg and rm > MaxReg) {
-
-                // ugly mem-mem case
-                var offset_from = (reg - MaxReg) * 8;
-                var offset_to = (rm - MaxReg) * 8;
-
-                if (behaviour == .ClearR15) {
-                    try out.appendSlice(&[_]u8{ 0x4D, 0x31, 0xFF }); // xor r15,r15
-                } else if (behaviour == .MovLeft) {
-                    // mov r15, [rsp - x]
-                    _ = try X64InstructionBuilder(1).new()
-                        .rex(REX.new().op64bit().extReg())
-                        .inst(.{MOV_RR_RM})
-                        .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(offset_from)), out);
-                } else if (behaviour == .Dirty) {
-                    // inst r15, [rsp - x]
-                    _ = try X64InstructionBuilder(len).new()
-                        .rex(REX.new().op64bit().extReg())
-                        .inst(inst_rm)
-                        .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rax <- rsp-offset
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(offset_from)), out);
-                }
-
-                // inst [rsp - y], r15
-                _ = try X64InstructionBuilder(len).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(inst_mr)
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rsp-offset <- rax
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_to)), out);
-            } else if (reg <= MaxReg) {
-                var rex = REX.new().op64bit();
-                if (reg > 7) {
-                    rex = rex.extReg();
-                }
-                var offset_to = (rm - MaxReg) * 8;
-                // inst [rsp - y], rax
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(inst_rm)
-                    .modRM(ModRM.new().reg(@intCast(reg)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // rbp-offset <- <reg>
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_to)), out);
-            } else {
-                var rex = REX.new().op64bit();
-                if (rm > 7) {
-                    rex = rex.extReg();
-                }
-                var offset_from = (reg - MaxReg) * 8;
-                // inst rax, MOV [rsp - y]
-                _ = try X64InstructionBuilder(len).new()
-                    .rex(rex)
-                    .inst(inst_mr)
-                    .modRM(ModRM.new().reg(@intCast(rm)).rm(RBP).mode(ModRM.Mode.SIB_DISP32)) // <reg> <- rbp-offset
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset_from)), out);
-            }
-        }
-
-        fn copy_to_r15(cfrom: u64, out: *std.ArrayList(u8)) !void {
-            var from = cfrom;
-            if (from > 3) {
-                from += 2;
-            }
-            if (from <= MaxReg) {
-                var rex = REX.new().op64bit().extReg();
-                if (from > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(R15).rm(@intCast(from)).mode(ModRM.Mode.RM))
-                    .nosib()
-                    .finish(out);
-            } else {
-                var offset = (from - MaxReg) * 8;
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{MOV_RR_RM})
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset)), out);
-            }
-        }
-
-        fn copy_from_r15(cto: u64, out: *std.ArrayList(u8)) !void {
-            var to = cto;
-            if (to > 3) {
-                to += 2;
-            }
-            if (to <= MaxReg) {
-                var rex = REX.new().op64bit().extReg();
-                if (to > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(R15).rm(@intCast(to)).mode(ModRM.Mode.RM))
-                    .nosib()
-                    .finish(out);
-            } else {
-                var offset = (to - MaxReg) * 8;
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{MOV_RR_MR})
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset)), out);
-            }
-        }
-
-        fn dest_left_right(cdest: u64, creg: u64, crm: u64, behaviour: X64DestLeftRightBehaviour, inst_rm: [len]u8, inst_mr: [len]u8, out: *std.ArrayList(u8)) !void {
-            var dest = cdest;
-            var reg = creg;
-            var rm = crm;
-
-            // Ignore RSP+RBP
-            if (reg > 3) {
-                reg += 2;
-            }
-            if (rm > 3) {
-                rm += 2;
-            }
-            if (dest > 3) {
-                dest += 2;
-            }
-
-            if (behaviour == .MovLeftApplyRight) {
-                try @This().left_and_right0(dest, reg, .Dirty, .{MOV_RR_RM}, .{MOV_RR_MR}, out);
-            } else if (behaviour == .OneDestApplyBoth or behaviour == .ZeroDestApplyBoth) {
-                var disp: u8 = if (behaviour == .OneDestApplyBoth) 1 else 0;
-                if (dest <= MaxReg) {
-                    var rex = REX.new().op64bit();
-                    if (dest > 7) {
-                        rex = rex.extReg();
-                    }
-                    _ = try X64InstructionBuilder(1)
-                        .new()
-                        .rex(rex)
-                        .inst(.{MOV_MIMM8})
-                        .modRM(ModRM.new().rm(@intCast(dest)).mode(ModRM.Mode.RM))
-                        .nosib()
-                        .disp32(disp, out); // this is abusive
-                } else {
-                    var offset = (dest - MaxReg) * 8;
-                    _ = try X64InstructionBuilder(1)
-                        .new()
-                        .norex()
-                        .inst(.{MOV_MIMM8})
-                        .modRM(ModRM.new().rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                        .sib(SIB.nothing())
-                        .disp32(-@as(i32, @intCast(offset)), out);
-                    try out.append(disp);
-                }
-            }
-
-            // apply left
-            if (behaviour == .OneDestApplyBoth or behaviour == .ZeroDestApplyBoth) {
-                if (reg <= MaxReg and dest <= MaxReg) {
-                    var rex = REX.new().op64bit();
-                    if (reg > 7) {
-                        rex = rex.extRMandSIBBase();
-                    }
-                    if (dest > 7) {
-                        rex = rex.extReg();
-                    }
-                    _ = try X64InstructionBuilder(1).new()
-                        .rex(rex)
-                        .inst(inst_rm)
-                        .modRM(ModRM.new().reg(@intCast(dest)).rm(@intCast(reg)).mode(ModRM.Mode.RM))
-                        .finish(out);
-                } else if (reg <= MaxReg) {
-                    var rex = REX.new().op64bit();
-                    if (reg > 7) {
-                        rex = rex.extReg();
-                    }
-                    var offset = (dest - MaxReg) * 8;
-                    _ = try X64InstructionBuilder(1)
-                        .new()
-                        .rex(rex)
-                        .inst(inst_mr)
-                        .modRM(ModRM.new().reg(@intCast(reg)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(offset)), out);
-                } else if (dest <= MaxReg) {
-                    var rex = REX.new().op64bit();
-                    if (dest > 7) {
-                        rex = rex.extReg();
-                    }
-                    var offset = (reg - MaxReg) * 8;
-                    _ = try X64InstructionBuilder(1)
-                        .new()
-                        .rex(rex)
-                        .inst(inst_rm)
-                        .modRM(ModRM.new().reg(@intCast(dest)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(offset)), out);
-                } else {
-                    var reg_offset = (reg - MaxReg) * 8;
-                    var dest_offset = (dest - MaxReg) * 8;
-                    // mov r15, reg
-                    _ = try X64InstructionBuilder(1).new()
-                        .rex(REX.new().op64bit().extReg())
-                        .inst(.{MOV_RR_RM}).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(reg_offset)), out);
-                    // inst dest, r15
-                    _ = try X64InstructionBuilder(len).new()
-                        .rex(REX.new().op64bit().extReg())
-                        .inst(inst_mr).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                        .nosib()
-                        .disp32(-@as(i32, @intCast(dest_offset)), out);
-                }
-            }
-
-            // apply right
-            if (rm <= MaxReg and dest <= MaxReg) {
-                var rex = REX.new().op64bit();
-                if (rm > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                if (dest > 7) {
-                    rex = rex.extReg();
-                }
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(rex)
-                    .inst(inst_rm)
-                    .modRM(ModRM.new().reg(@intCast(dest)).rm(@intCast(rm)).mode(ModRM.Mode.RM))
-                    .finish(out);
-            } else if (rm <= MaxReg) {
-                var rex = REX.new().op64bit();
-                if (rm > 7) {
-                    rex = rex.extReg();
-                }
-                var offset = (dest - MaxReg) * 8;
-                _ = try X64InstructionBuilder(1)
-                    .new()
-                    .rex(rex)
-                    .inst(inst_mr)
-                    .modRM(ModRM.new().reg(@intCast(rm)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset)), out);
-            } else if (dest <= MaxReg) {
-                var rex = REX.new().op64bit();
-                if (dest > 7) {
-                    rex = rex.extReg();
-                }
-                var offset = (rm - MaxReg) * 8;
-                _ = try X64InstructionBuilder(1)
-                    .new()
-                    .rex(rex)
-                    .inst(inst_rm)
-                    .modRM(ModRM.new().reg(@intCast(dest)).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset)), out);
-            } else {
-                var dest_offset = (dest - MaxReg) * 8;
-                var rm_offset = (rm - MaxReg) * 8;
-                // mov r15, reg
-                _ = try X64InstructionBuilder(1).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{MOV_RR_RM}).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(rm_offset)), out);
-                // inst dest, r15
-                _ = try X64InstructionBuilder(len).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(inst_mr).modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(dest_offset)), out);
-            }
-        }
-    };
-}
 
 const Compiler = struct {
     const JmpFix = struct {
@@ -738,28 +135,455 @@ const Compiler = struct {
     }
 };
 
-fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
-    const MOV_RR_MR: u8 = 0x89;
-    const MOV_RR_RM: u8 = 0x8B;
-    const ADD_MR: u8 = 0x01;
-    const ADD_RM: u8 = 0x03;
-    const SUB_RM: u8 = 0x2b;
-    const SUB_MR: u8 = 0x29;
+// Who thought RAX, RCX, RDX, RBX is the right order?
+// It should be RAX, RBX, RCX, RDX ofc...
+const X86_64_REG_REMAPPING = [_]u8{ 0, 3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
-    const RBP: u8 = 0b101;
-    const RSP: u8 = 0b100;
-    const R15: u8 = 15;
+const RSP: u8 = 0b100;
+const RBP: u8 = 0b101;
+const R14: u8 = 0b1110;
+const R15: u8 = 0b1111;
+
+const MaxReg = 13;
+const MOV_MIMM8: u8 = 0xC6;
+const MOV_RR_MR: u8 = 0x89;
+const MOV_RR_RM: u8 = 0x8B;
+const ADD_MR: u8 = 0x01;
+const ADD_RM: u8 = 0x03;
+const SUB_RM: u8 = 0x2b;
+const SUB_MR: u8 = 0x29;
+
+const MOV = X64Instruction{
+    .opcode_rm = &[_]u8{MOV_RR_RM},
+    .opcode_mr = &[_]u8{MOV_RR_MR},
+    .rex64bit = true,
+};
+
+const ADD = X64Instruction{
+    .opcode_rm = &[_]u8{ADD_RM},
+    .opcode_mr = &[_]u8{ADD_MR},
+    .rex64bit = true,
+};
+
+const SUB = X64Instruction{
+    .opcode_rm = &[_]u8{SUB_RM},
+    .opcode_mr = &[_]u8{SUB_MR},
+    .rex64bit = true,
+};
+
+const SUB_ADD_IMM32 = X64Instruction{
+    .opcode_rm = &[_]u8{0x81},
+    .opcode_mr = null,
+    .rex64bit = true,
+};
+
+const MUL = X64Instruction{
+    .opcode_rm = &[_]u8{ 0x0f, 0xaf },
+    .opcode_mr = null,
+    .rex64bit = true,
+};
+
+fn u64_to_i32_offset(int: u64) i32 {
+    return -@as(i32, @bitCast(@as(u32, @intCast(int))));
+}
+
+fn copy_virtual_register_to_cpu_register(from: u64, to: u8, out: *std.ArrayList(u8)) !void {
+    var reg = from;
+    if (reg > 3) {
+        reg += 2;
+    }
+    if (reg > MaxReg) {
+        var b = X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+            .reg(to)
+            .rm(RBP)
+            .disp32(u64_to_i32_offset(reg - MaxReg - 1) * 8);
+        if (to > 7) {
+            b = b.extreg();
+        }
+        try b.encode_rm(out);
+    } else {
+        var b = X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.RM)
+            .reg(to)
+            .rm(reg);
+        if (to > 7) {
+            b = b.extreg();
+        }
+        if (reg > 7) {
+            b = b.extRM();
+        }
+        try b.encode_rm(out);
+    }
+}
+
+// TODO: Check if R12 must be skipped....
+
+fn copy_cpu_register_to_virtual_register(to: u64, from: u8, out: *std.ArrayList(u8)) !void {
+    var reg = to;
+    if (reg > 3) {
+        reg += 2;
+    }
+    if (reg > MaxReg) {
+        var b = X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+            .reg(from)
+            .rm(RBP)
+            .disp32(u64_to_i32_offset(reg - MaxReg - 1) * 8);
+        if (from > 7) {
+            b = b.extreg();
+        }
+        try b.encode_mr(out);
+    } else {
+        var b = X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.RM)
+            .reg(from)
+            .rm(reg);
+        if (from > 7) {
+            b = b.extreg();
+        }
+        if (reg > 7) {
+            b = b.extRM();
+        }
+        try b.encode_mr(out);
+    }
+}
+
+fn get_or_load_register14(reg: u64, out: *std.ArrayList(u8)) !u8 {
+    return get_or_load_to_register(reg, R14, out);
+}
+
+fn get_or_load_register15(reg: u64, out: *std.ArrayList(u8)) !u8 {
+    return get_or_load_to_register(reg, R15, out);
+}
+
+fn get_or_load_to_register(reg: u64, realreg: u8, out: *std.ArrayList(u8)) !u8 {
+    var rreg = reg;
+    if (rreg > 3) {
+        rreg += 2;
+    }
+    if (rreg > MaxReg) {
+        _ = try X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+            .reg(realreg)
+            .rm(RBP)
+            .disp32(u64_to_i32_offset(rreg - MaxReg - 1) * 8)
+            .encode_rm(out);
+        return realreg;
+    }
+    return @intCast(rreg);
+}
+
+fn restore_if_needed(corgreg: u64, reg: u8, out: *std.ArrayList(u8)) !void {
+    var orgreg = corgreg;
+    if (orgreg > 3) {
+        orgreg += 2;
+    }
+    if (orgreg > MaxReg) {
+        _ = try X64InstructionBuilder.new(MOV)
+            .extreg()
+            .r64bit()
+            .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+            .reg(reg)
+            .rm(RBP)
+            .disp32(u64_to_i32_offset((orgreg - MaxReg - 1) * 8))
+            .encode_mr(out);
+    }
+}
+
+const X64Instruction = struct {
+    opcode_rm: ?[]const u8,
+    opcode_mr: ?[]const u8,
+    rex64bit: bool,
+};
+
+const X64InstructionBuilder = struct {
+    const RMMode = enum(u8) {
+        SIB = 0b00000000,
+        SIB_DISP8 = 0b01000000,
+        SIB_DISP32 = 0b10000000,
+        RM = 0b11000000,
+    };
+    const REX = struct {
+        r64bit: bool = false,
+        extReg: bool = false,
+        extSib: bool = false,
+        extRm: bool = false,
+    };
+    const SIB = struct {
+        scale: Scale = Scale.TIMES1,
+        base: ?u8 = null,
+        index: ?u8 = null,
+    };
+    const Scale = enum(u8) {
+        TIMES1 = 0b00000000,
+        TIMES2 = 0b01000000,
+        TIMES4 = 0b10000000,
+        TIMES8 = 0b11000000,
+    };
+    const REX_BYTE: u8 = 0b01000000;
+    const Flag = enum(u8) {
+        /// 64bit operand size
+        W = 0b00001000,
+        /// Extended MODRM.reg
+        R = 0b00000100,
+        /// Extend SIB.index
+        X = 0b00000010,
+        /// Extended MODRM.rm
+        B = 0b00000001,
+    };
+    const ModRM = struct {
+        mode: RMMode = RMMode.RM,
+        modreg: ?u64 = null,
+        modrm: ?u64 = null,
+    };
+    instruction: X64Instruction,
+    _modrm: ?ModRM = null,
+    _rex: ?REX = null,
+    _sib: ?SIB = null,
+    _disp32: ?i32 = null,
+
+    fn new(instruction: X64Instruction) X64InstructionBuilder {
+        return .{ .instruction = instruction };
+    }
+
+    fn modrm(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.*;
+        if (v._modrm) |_| {
+            return v;
+        }
+        v._modrm = .{};
+        return v;
+    }
+
+    fn rmmode(old: *const X64InstructionBuilder, mode: RMMode) X64InstructionBuilder {
+        var v = old.modrm();
+        if (v._modrm) |*_m| {
+            _m.mode = mode;
+        }
+        return v;
+    }
+
+    fn rex(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.*;
+        if (v._rex) |_| {
+            return v;
+        }
+        v._rex = .{};
+        return v;
+    }
+
+    fn r64bit(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.rex();
+        if (v._rex) |*r| {
+            r.r64bit = true;
+        }
+        return v;
+    }
+
+    fn extreg(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.rex();
+        if (v._rex) |*r| {
+            r.extReg = true;
+        }
+        return v;
+    }
+
+    fn extSIB(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.rex();
+        if (v._rex) |*r| {
+            r.extSib = true;
+        }
+        return v;
+    }
+
+    fn extRM(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.rex();
+        if (v._rex) |*r| {
+            r.extRm = true;
+        }
+        return v;
+    }
+
+    fn sib(old: *const X64InstructionBuilder) X64InstructionBuilder {
+        var v = old.*;
+        if (v._sib) |_| {
+            return v;
+        }
+        v._sib = .{};
+        return v;
+    }
+
+    fn index(old: *const X64InstructionBuilder, idx: u8) X64InstructionBuilder {
+        var v = old.sib();
+        if (v._sib) |*s| {
+            s.index = idx;
+        }
+        return v;
+    }
+
+    fn scale(old: *const X64InstructionBuilder, sc: Scale) X64InstructionBuilder {
+        var v = old.sib();
+        if (v._sib) |*s| {
+            s.scale = sc;
+        }
+        return v;
+    }
+
+    fn base(old: *const X64InstructionBuilder, b: u8) X64InstructionBuilder {
+        var v = old.sib();
+        if (v._sib) |*s| {
+            s.base = b;
+        }
+        return v;
+    }
+
+    fn reg(old: *const X64InstructionBuilder, r: u64) X64InstructionBuilder {
+        var v = old.modrm();
+        if (v._modrm) |*m| {
+            m.modreg = r;
+        }
+        return v;
+    }
+
+    fn rm(old: *const X64InstructionBuilder, r: u64) X64InstructionBuilder {
+        var v = old.modrm();
+        if (v._modrm) |*m| {
+            m.modrm = r;
+        }
+        return v;
+    }
+
+    fn disp32(old: *const X64InstructionBuilder, offset: i32) X64InstructionBuilder {
+        var v = old.*;
+        v._disp32 = offset;
+        return v;
+    }
+
+    fn encode_virtual(cb: *const X64InstructionBuilder, destination: u64, out: *std.ArrayList(u8)) !void {
+        var b = cb.*;
+        if (b.instruction.rex64bit) {
+            b = b.r64bit();
+        }
+        if (b._modrm) |m| {
+            var rreg = m.modreg orelse 0;
+            if (rreg > 3) {
+                rreg += 2;
+            }
+            if (rreg > 7) {
+                b = b.extreg();
+            }
+            var rrm = m.modrm orelse 0;
+            if (rrm > 3) {
+                rreg += 2;
+            }
+            if (rrm > 7) {
+                b = b.extRM();
+            }
+            var rdest = destination;
+            if (destination > 3) {
+                rdest += 2;
+            }
+            if (rreg <= MaxReg and rrm <= MaxReg) {
+                if (rdest == rreg) {
+                    try b.reg(rreg).rm(rrm).encode_mr(out);
+                } else {
+                    try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
+                    try b.reg(R14).rm(rrm).encode_rm(out);
+                }
+            } else if (rreg <= MaxReg) {
+                try copy_virtual_register_to_cpu_register(m.modrm orelse 0, R15, out);
+                if (rdest == rreg) {
+                    try b.reg(rreg).rm(R15).encode_mr(out);
+                } else {
+                    try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
+                    try b.reg(R14).rm(R15).encode_rm(out);
+                    try copy_cpu_register_to_virtual_register(destination, R14, out);
+                }
+            } else if (rrm <= MaxReg) {
+                try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
+                try b.reg(R14).rm(rrm).encode_rm(out);
+                try copy_cpu_register_to_virtual_register(destination, R14, out);
+            } else {
+                try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
+                try copy_virtual_register_to_cpu_register(m.modrm orelse 0, R15, out);
+                try b.reg(R14).rm(R15).encode_rm(out);
+                try copy_cpu_register_to_virtual_register(destination, R14, out);
+            }
+        }
+    }
+
+    fn encode_rm(b: *const X64InstructionBuilder, out: *std.ArrayList(u8)) !void {
+        try b.encode_real_rex(out);
+        try out.appendSlice(b.instruction.opcode_rm orelse &[_]u8{0});
+        try b.encode_real_mod_sib_disp(out);
+    }
+
+    fn encode_mr(b: *const X64InstructionBuilder, out: *std.ArrayList(u8)) !void {
+        try b.encode_real_rex(out);
+        try out.appendSlice(b.instruction.opcode_mr orelse &[_]u8{0});
+        try b.encode_real_mod_sib_disp(out);
+    }
+
+    fn encode_real_rex(b: *const X64InstructionBuilder, out: *std.ArrayList(u8)) !void {
+        if (b._rex) |r| {
+            var byte: u8 = REX_BYTE;
+            if (r.r64bit) {
+                byte |= @intFromEnum(Flag.W);
+            }
+            if (r.extSib) {
+                byte |= @intFromEnum(Flag.X);
+            }
+            if (r.extReg) {
+                byte |= @intFromEnum(Flag.R);
+            }
+            if (r.extRm) {
+                byte |= @intFromEnum(Flag.B);
+            }
+            try out.append(byte);
+        }
+    }
+
+    fn encode_real_mod_sib_disp(b: *const X64InstructionBuilder, out: *std.ArrayList(u8)) !void {
+        if (b._modrm) |m| {
+            var byte: u8 = @intFromEnum(m.mode);
+            byte |= @intCast((((m.modreg orelse 0) & 0b111) << 3));
+            byte |= @intCast((m.modrm orelse 0) & 0b111);
+            std.debug.print("{?} {?} {?}\n", .{ m.mode, m.modreg, m.modrm });
+            try out.append(byte);
+        }
+
+        if (b._sib) |s| {
+            var byte: u8 = @intFromEnum(s.scale);
+            byte |= @intCast(((s.index orelse 0) & 0b111) << 3);
+            byte |= @intCast(((s.base orelse 0) & 0b111));
+            try out.append(byte);
+        }
+
+        if (b._disp32) |*d| {
+            var data: *const [4]u8 = @ptrCast(d);
+            try out.appendSlice(data);
+        }
+    }
+};
+
+fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
+    // const MOVQ_HALF: u8 = 0b10111000;
+
     switch (ir) {
         IR.Copy => |cvalue| {
             var value = cvalue;
-            try X64IrToInstructionBuilder(1).left_and_right(
-                value.from,
-                value.to,
-                .Dirty,
-                .{MOV_RR_RM},
-                .{MOV_RR_MR},
-                out,
-            );
+            try X64InstructionBuilder.new(MOV).reg(value.to).rm(value.from).encode_virtual(value.to, out);
         },
         IR.Jmp => |cvalue| {
             var value = cvalue;
@@ -777,77 +601,15 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
         },
         IR.Add => |cvalue| {
             var value = cvalue;
-            if (value.dest == value.left) {
-                try X64IrToInstructionBuilder(1).left_and_right(
-                    value.left,
-                    value.right,
-                    .MovLeft,
-                    .{ADD_RM},
-                    .{ADD_MR},
-                    out,
-                );
-            } else {
-                try X64IrToInstructionBuilder(1).dest_left_right(
-                    value.dest,
-                    value.left,
-                    value.right,
-                    X64DestLeftRightBehaviour.MovLeftApplyRight,
-                    .{ADD_RM},
-                    .{ADD_MR},
-                    out,
-                );
-            }
+            try X64InstructionBuilder.new(ADD).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
         },
         IR.Sub => |cvalue| {
             var value = cvalue;
-            if (value.dest == value.left) {
-                try X64IrToInstructionBuilder(1).left_and_right(
-                    value.left,
-                    value.right,
-                    .MovLeft,
-                    .{SUB_RM},
-                    .{SUB_MR},
-                    out,
-                );
-            } else {
-                try X64IrToInstructionBuilder(1).dest_left_right(
-                    value.dest,
-                    value.left,
-                    value.right,
-                    X64DestLeftRightBehaviour.MovLeftApplyRight,
-                    .{SUB_RM},
-                    .{SUB_MR},
-                    out,
-                );
-            }
+            try X64InstructionBuilder.new(SUB).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
         },
         IR.Mul => |cvalue| {
             var value = cvalue;
-            try X64IrToInstructionBuilder(0).copy_to_r15(value.left, out);
-            const builder = X64IrToInstructionBuilder(0);
-            if (value.right > 3) {
-                value.right += 2;
-            }
-            if (value.right > builder.MaxReg) {
-                var offset = (value.right - X64IrToInstructionBuilder(0).MaxReg) * 8;
-                _ = try X64InstructionBuilder(2).new()
-                    .rex(REX.new().op64bit().extReg())
-                    .inst(.{ 0x0f, 0xaf })
-                    .modRM(ModRM.new().reg(R15).rm(RBP).mode(ModRM.Mode.SIB_DISP32))
-                    .nosib()
-                    .disp32(-@as(i32, @intCast(offset)), out);
-            } else {
-                var rex = REX.new().op64bit().extReg();
-                if (value.right > 7) {
-                    rex = rex.extRMandSIBBase();
-                }
-                _ = try X64InstructionBuilder(2).new()
-                    .rex(rex)
-                    .inst(.{ 0x0f, 0xaf }).modRM(ModRM.new().reg(R15).rm(@intCast(value.right)).mode(ModRM.Mode.RM))
-                    .nosib()
-                    .finish(out);
-            }
-            try builder.copy_from_r15(value.dest, out);
+            try X64InstructionBuilder.new(MUL).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
         },
         IR.FnPrologue => |cvalue| {
             var value = cvalue;
@@ -855,23 +617,11 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
                 0x55, // push rbp
                 0x48, 0x89, 0xe5, // mov rbp, rsp
             });
-            _ = try X64InstructionBuilder(1).new()
-                .rex(REX.new().op64bit()).inst(.{
-                0x81, // sub rsp, smthsmth with modrm.reg = 5
-            })
-                .modRM(ModRM.new().reg(5).rm(RSP).mode(ModRM.Mode.RM))
-                .nosib()
-                .disp32(@intCast((value.registers - X64IrToInstructionBuilder(0).MaxReg + 2) * 8), out);
+            try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(5).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
         },
         IR.FnEpilogue => |cvalue| {
             var value = cvalue;
-            _ = try X64InstructionBuilder(1).new()
-                .rex(REX.new().op64bit()).inst(.{
-                0x81, // add rsp, smthsmth with modrm.reg = 0
-            })
-                .modRM(ModRM.new().reg(0).rm(RSP).mode(ModRM.Mode.RM))
-                .nosib()
-                .disp32(@intCast((value.registers - X64IrToInstructionBuilder(0).MaxReg + 2) * 8), out);
+            _ = try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(0).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
             try out.appendSlice(&[_]u8{
                 0x48, 0x89, 0xec, // mov rsp, rbp
                 0x5d, // pop rbp
@@ -879,6 +629,15 @@ fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
         },
         IR.Return => {
             try out.append(0xc3); // ret
+        },
+        IR.Set => |cvalue| {
+            try out.appendSlice(&[_]u8{
+                X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.B) | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                0b10111000 | (0b110), // movabs
+            });
+            var slice: *const [8]u8 = @ptrCast(&cvalue.value);
+            try out.appendSlice(slice);
+            try restore_if_needed(cvalue.dest, R14, out);
         },
         else => @panic("Not yet supported"),
     }
@@ -907,6 +666,9 @@ pub fn main() !void {
     var ir: std.ArrayList(IR) = std.ArrayList(IR).init(std.heap.page_allocator);
     try ir.append(.{ .Label = .{ .name = 1 } });
     try ir.append(.{ .FnPrologue = .{ .registers = 123 } });
+    try ir.append(.{ .Set = .{ .dest = 21, .value = 123 } });
+    try ir.append(.{ .Set = .{ .dest = 22, .value = 456 } });
+    try ir.append(.{ .Add = .{ .left = 21, .right = 22, .dest = 0 } });
     try ir.append(.{ .FnEpilogue = .{ .registers = 123 } });
     try ir.append(.Return);
 
@@ -921,6 +683,5 @@ pub fn main() !void {
     }
     std.debug.print("\n", .{});
     var f: *fn () i32 = @ptrCast(buff);
-    _ = f();
-    std.debug.print("Worked\n", .{});
+    std.debug.print("Worked: {}\n", .{f()});
 }
