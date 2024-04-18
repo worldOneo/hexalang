@@ -72,6 +72,7 @@ const IR = union(enum) {
         registers: u64,
     },
     Return,
+    Yield,
 };
 
 const Compiler = struct {
@@ -94,10 +95,16 @@ const Compiler = struct {
         }
     };
 
+    fn defaultyield(p: *anyopaque) void {
+        std.debug.print("Yielded: {?}\n", .{p});
+    }
+
     ir: *std.ArrayList(IR),
     machinecode: std.ArrayList(u8),
     jmpfixes: std.ArrayList(JmpFix),
     jmplabelmap: std.AutoHashMap(u64, u64),
+    yieldfn: *const fn (*anyopaque) void = defaultyield,
+    yieldarg: *anyopaque = @constCast(&defaultyield),
 
     fn new(allocator: std.mem.Allocator, ir: *std.ArrayList(IR)) Compiler {
         return Compiler{
@@ -115,13 +122,105 @@ const Compiler = struct {
                     try compiler.jmplabelmap.put(label.name, compiler.machinecode.items.len);
                 },
                 else => {
-                    var fix = try comp(ir, &compiler.machinecode);
+                    var fix = try compiler.comp(ir, &compiler.machinecode);
                     if (fix) |fixat| {
                         try compiler.jmpfixes.append(fixat);
                     }
                 },
             }
         }
+    }
+
+    fn comp(compiler: *Compiler, ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
+        // const MOVQ_HALF: u8 = 0b10111000;
+
+        switch (ir) {
+            IR.Copy => |cvalue| {
+                var value = cvalue;
+                try X64InstructionBuilder.new(MOV).reg(value.to).rm(value.from).encode_virtual(value.to, out);
+            },
+            IR.Jmp => |cvalue| {
+                var value = cvalue;
+                var offset = out.items.len;
+
+                try out.appendSlice(&[_]u8{
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
+                    0x41, 0xff, 0xe7, // jmp r15
+                });
+
+                return Compiler.JmpFix{
+                    .fixat = offset,
+                    .label = value.label,
+                };
+            },
+            IR.Add => |cvalue| {
+                var value = cvalue;
+                try X64InstructionBuilder.new(ADD).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
+            },
+            IR.Sub => |cvalue| {
+                var value = cvalue;
+                try X64InstructionBuilder.new(SUB).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
+            },
+            IR.Mul => |cvalue| {
+                var value = cvalue;
+                try X64InstructionBuilder.new(MUL).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
+            },
+            IR.FnPrologue => |cvalue| {
+                var value = cvalue;
+                try out.appendSlice(&[_]u8{
+                    0x55, // push rbp
+                    0x48, 0x89, 0xe5, // mov rbp, rsp
+                });
+                try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(5).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
+            },
+            IR.FnEpilogue => |cvalue| {
+                var value = cvalue;
+                _ = try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(0).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
+                try out.appendSlice(&[_]u8{
+                    0x48, 0x89, 0xec, // mov rsp, rbp
+                    0x5d, // pop rbp
+                });
+            },
+            IR.Return => {
+                try out.append(0xc3); // ret
+            },
+            IR.Set => |cvalue| {
+                try out.appendSlice(&[_]u8{
+                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.B) | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                    0b10111000 | (0b110), // movabs r14,
+                });
+                var slice: *const [8]u8 = @ptrCast(&cvalue.value);
+                try out.appendSlice(slice);
+                try restore_if_needed(cvalue.dest, R14, out);
+            },
+            IR.Yield => {
+                try out.appendSlice(&[_]u8{
+                    0x50, // push rax
+                    0x51, // push rcx
+                });
+                try out.appendSlice(&[_]u8{
+                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                    0b10111000 | (0b000), // movabs rax,
+                });
+                var slice: *const [8]u8 = @ptrCast(&compiler.yieldfn);
+                try out.appendSlice(slice);
+                try out.appendSlice(&[_]u8{
+                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                    0b10111000 | (0b001), // movabs rax,
+                });
+                slice = @ptrCast(&compiler.yieldarg);
+                try out.appendSlice(slice);
+                try out.appendSlice(&[_]u8{
+                    0xff, 0xd1, // call rax
+                });
+                try out.appendSlice(&[_]u8{
+                    0x58, // pop rax
+                    0x59, // pop rcx
+                });
+            },
+            else => @panic("Not yet supported"),
+        }
+        return null;
     }
 
     fn machinecodesize(compiler: *Compiler) u64 {
@@ -577,73 +676,6 @@ const X64InstructionBuilder = struct {
     }
 };
 
-fn comp(ir: IR, out: *std.ArrayList(u8)) !?Compiler.JmpFix {
-    // const MOVQ_HALF: u8 = 0b10111000;
-
-    switch (ir) {
-        IR.Copy => |cvalue| {
-            var value = cvalue;
-            try X64InstructionBuilder.new(MOV).reg(value.to).rm(value.from).encode_virtual(value.to, out);
-        },
-        IR.Jmp => |cvalue| {
-            var value = cvalue;
-            var offset = out.items.len;
-
-            try out.appendSlice(&[_]u8{
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
-                0x41, 0xff, 0xe7, // jmp r15
-            });
-
-            return Compiler.JmpFix{
-                .fixat = offset,
-                .label = value.label,
-            };
-        },
-        IR.Add => |cvalue| {
-            var value = cvalue;
-            try X64InstructionBuilder.new(ADD).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
-        },
-        IR.Sub => |cvalue| {
-            var value = cvalue;
-            try X64InstructionBuilder.new(SUB).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
-        },
-        IR.Mul => |cvalue| {
-            var value = cvalue;
-            try X64InstructionBuilder.new(MUL).reg(value.left).rm(value.right).encode_virtual(value.dest, out);
-        },
-        IR.FnPrologue => |cvalue| {
-            var value = cvalue;
-            try out.appendSlice(&[_]u8{
-                0x55, // push rbp
-                0x48, 0x89, 0xe5, // mov rbp, rsp
-            });
-            try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(5).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
-        },
-        IR.FnEpilogue => |cvalue| {
-            var value = cvalue;
-            _ = try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(0).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
-            try out.appendSlice(&[_]u8{
-                0x48, 0x89, 0xec, // mov rsp, rbp
-                0x5d, // pop rbp
-            });
-        },
-        IR.Return => {
-            try out.append(0xc3); // ret
-        },
-        IR.Set => |cvalue| {
-            try out.appendSlice(&[_]u8{
-                X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.B) | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
-                0b10111000 | (0b110), // movabs
-            });
-            var slice: *const [8]u8 = @ptrCast(&cvalue.value);
-            try out.appendSlice(slice);
-            try restore_if_needed(cvalue.dest, R14, out);
-        },
-        else => @panic("Not yet supported"),
-    }
-    return null;
-}
-
 fn compile(allocator: std.mem.Allocator, relative_offset: u64) !std.ArrayList(u8) {
     _ = relative_offset;
     var list = try std.ArrayList(u8).init(allocator);
@@ -657,7 +689,7 @@ pub fn main() !void {
         0xC3, // ret
     };
     _ = code;
-    var buff = try alloc(100);
+    var buff = try alloc(4096);
     // var disp: i32 = 984;
     // std.debug.print("{}\n", .{@as(*const [4]u8, @ptrCast(&disp))[1]});
     // std.mem.copy(u8, buff, &code);
@@ -668,6 +700,7 @@ pub fn main() !void {
     try ir.append(.{ .FnPrologue = .{ .registers = 123 } });
     try ir.append(.{ .Set = .{ .dest = 21, .value = 123 } });
     try ir.append(.{ .Set = .{ .dest = 22, .value = 456 } });
+    try ir.append(.Yield);
     try ir.append(.{ .Add = .{ .left = 21, .right = 22, .dest = 0 } });
     try ir.append(.{ .FnEpilogue = .{ .registers = 123 } });
     try ir.append(.Return);
@@ -678,7 +711,7 @@ pub fn main() !void {
 
     @memset(buff, 0);
     std.mem.copy(u8, buff, compiler.machinecode.items);
-    for (buff) |item| {
+    for (compiler.machinecode.items) |item| {
         std.debug.print("{x:0>2} ", .{item});
     }
     std.debug.print("\n", .{});
