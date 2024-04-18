@@ -62,6 +62,10 @@ const IR = union(enum) {
     Jmp: struct {
         label: u64,
     },
+    JmpIf: struct {
+        label: u64,
+        condition: u64,
+    },
     Label: struct {
         name: u64,
     },
@@ -218,6 +222,22 @@ const Compiler = struct {
                     0x59, // pop rcx
                 });
             },
+            IR.JmpIf => |cvalue| {
+                try X64InstructionBuilder.new(TEST).reg(cvalue.condition).rm(cvalue.condition).encode_virtual_nodest(out);
+                var offset = out.items.len;
+                try out.appendSlice(&[_]u8{
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
+                });
+                try out.appendSlice(&[_]u8{
+                    0x4c, 0x8d, 0x35, 0x07, 0x00, 0x00, 0x00, // lea r14, [rip+7]
+                });
+                try out.appendSlice(&[_]u8{
+                    0x4d, 0x0f, 0x45, 0xf7, // cmovne r14, r15
+                    0x41, 0xff, 0xe6, // jmp r14
+                });
+                // TODO: cond jmp
+                return Compiler.JmpFix{ .fixat = offset, .label = cvalue.label };
+            },
             else => @panic("Not yet supported"),
         }
         return null;
@@ -251,6 +271,11 @@ const ADD_MR: u8 = 0x01;
 const ADD_RM: u8 = 0x03;
 const SUB_RM: u8 = 0x2b;
 const SUB_MR: u8 = 0x29;
+
+const TEST = X64Instruction{
+    .opcode_rm = &[_]u8{0x85},
+    .rex64bit = true,
+};
 
 const MOV = X64Instruction{
     .opcode_rm = &[_]u8{MOV_RR_RM},
@@ -401,8 +426,8 @@ fn restore_if_needed(corgreg: u64, reg: u8, out: *std.ArrayList(u8)) !void {
 }
 
 const X64Instruction = struct {
-    opcode_rm: ?[]const u8,
-    opcode_mr: ?[]const u8,
+    opcode_rm: ?[]const u8 = null,
+    opcode_mr: ?[]const u8 = null,
     rex64bit: bool,
 };
 
@@ -569,6 +594,22 @@ const X64InstructionBuilder = struct {
         return v;
     }
 
+    fn encode_virtual_nodest(cb: *const X64InstructionBuilder, out: *std.ArrayList(u8)) !void {
+        var b = cb.extreg().extRM();
+        if (b.instruction.rex64bit) {
+            b = b.r64bit();
+        }
+        if (b._modrm) |m| {
+            try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
+            if (m.modreg == m.modrm) {
+                try b.reg(R14).rm(R14).encode_rm(out);
+                return;
+            }
+            try copy_virtual_register_to_cpu_register(m.modrm orelse 0, R15, out);
+            try b.reg(R14).rm(R15).encode_rm(out);
+        }
+    }
+
     fn encode_virtual(cb: *const X64InstructionBuilder, destination: u64, out: *std.ArrayList(u8)) !void {
         var b = cb.*;
         if (b.instruction.rex64bit) {
@@ -700,6 +741,10 @@ pub fn main() !void {
     try ir.append(.{ .FnPrologue = .{ .registers = 123 } });
     try ir.append(.{ .Set = .{ .dest = 21, .value = 123 } });
     try ir.append(.{ .Set = .{ .dest = 22, .value = 456 } });
+    try ir.append(.{ .Set = .{ .dest = 23, .value = 0 } });
+    try ir.append(.{ .JmpIf = .{ .label = 2, .condition = 23 } });
+    try ir.append(.Yield);
+    try ir.append(.{ .Label = .{ .name = 2 } });
     try ir.append(.Yield);
     try ir.append(.{ .Add = .{ .left = 21, .right = 22, .dest = 0 } });
     try ir.append(.{ .FnEpilogue = .{ .registers = 123 } });
@@ -707,7 +752,7 @@ pub fn main() !void {
 
     var compiler = Compiler.new(std.heap.page_allocator, &ir);
     try compiler.compile();
-    compiler.fixToBaseLocation(1234);
+    compiler.fixToBaseLocation(@intFromPtr(buff.ptr));
 
     @memset(buff, 0);
     std.mem.copy(u8, buff, compiler.machinecode.items);
