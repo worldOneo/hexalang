@@ -75,6 +75,11 @@ const IR = union(enum) {
     FnPrologue: struct {
         registers: u64,
     },
+    CallFn: struct {
+        args: []const u64,
+        label: u64,
+        current_fn_registers: u64,
+    },
     Return,
     Yield,
 };
@@ -100,7 +105,13 @@ const Compiler = struct {
     };
 
     fn defaultyield(p: *anyopaque) void {
-        std.debug.print("Yielded: {?}\n", .{p});
+        var rdx = asm volatile ("andq %rax, %rax"
+            : [ret] "={rdx}" (-> usize),
+        );
+        var rbx = asm volatile ("andq %rax, %rax"
+            : [ret] "={rbx}" (-> usize),
+        );
+        std.debug.print("Yielded: {?}, rdx={?}, rbx={?}\n", .{ p, rdx, rbx });
     }
 
     ir: *std.ArrayList(IR),
@@ -175,11 +186,11 @@ const Compiler = struct {
                     0x55, // push rbp
                     0x48, 0x89, 0xe5, // mov rbp, rsp
                 });
-                try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(5).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
+                try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(5).rm(RSP).disp32(@intCast((value.registers - MaxCPUReg + 2) * 8)).encode_rm(out);
             },
             IR.FnEpilogue => |cvalue| {
                 var value = cvalue;
-                _ = try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(0).rm(RSP).disp32(@intCast((value.registers - MaxReg + 2) * 8)).encode_rm(out);
+                _ = try X64InstructionBuilder.new(SUB_ADD_IMM32).r64bit().reg(0).rm(RSP).disp32(@intCast((value.registers - MaxCPUReg + 2) * 8)).encode_rm(out);
                 try out.appendSlice(&[_]u8{
                     0x48, 0x89, 0xec, // mov rsp, rbp
                     0x5d, // pop rbp
@@ -203,13 +214,13 @@ const Compiler = struct {
                     0x51, // push rcx
                 });
                 try out.appendSlice(&[_]u8{
-                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.W
                     0b10111000 | (0b000), // movabs rax,
                 });
                 var slice: *const [8]u8 = @ptrCast(&compiler.yieldfn);
                 try out.appendSlice(slice);
                 try out.appendSlice(&[_]u8{
-                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.WB
+                    X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.W), // REX.W
                     0b10111000 | (0b001), // movabs rax,
                 });
                 slice = @ptrCast(&compiler.yieldarg);
@@ -235,8 +246,77 @@ const Compiler = struct {
                     0x4d, 0x0f, 0x45, 0xf7, // cmovne r14, r15
                     0x41, 0xff, 0xe6, // jmp r14
                 });
-                // TODO: cond jmp
                 return Compiler.JmpFix{ .fixat = offset, .label = cvalue.label };
+            },
+            IR.CallFn => |cvalue| {
+                for (0..cvalue.current_fn_registers) |reg| {
+                    var rreg = to_real_reg(reg);
+                    if (rreg > MaxCPUReg) {
+                        break;
+                    }
+                    if (rreg > 7) {
+                        try out.append(X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.B));
+                    }
+                    try out.append(0x50 | @as(u8, @intCast(rreg & 0b111))); // push reg
+                }
+                // stack is now:
+                // [stack reg 1]
+                // [stack reg 2]
+                // ...
+                // [stack reg N]
+                // [cpu reg 0]
+                // ...
+                // [cpu reg N]
+
+                var i: usize = 0;
+                for (cvalue.args) |arg| {
+                    var rreg = to_real_reg(arg);
+                    var destreg = to_real_reg(i);
+
+                    // read reg from old fn frame
+                    if (rreg > MaxCPUReg) {
+                        try X64InstructionBuilder.new(MOV).r64bit().extreg()
+                            .reg(R14).rm(RBP).rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+                            .disp32(u64_to_i32_offset((rreg - MaxCPUReg - 1) * 8)).encode_rm(out);
+                    } else {
+                        try X64InstructionBuilder.new(MOV).r64bit().extreg()
+                            .reg(R14).rm(RBP).rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+                            .disp32(u64_to_i32_offset((cvalue.current_fn_registers - UsableCPURegs + 1 + arg) * 8)).encode_rm(out); // read pushed var
+                    }
+
+                    // insert into new fn frame
+                    if (destreg > MaxCPUReg) {
+                        try X64InstructionBuilder.new(MOV).r64bit().extreg()
+                            .reg(R14).rm(RBP).rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
+                            .disp32(u64_to_i32_offset((cvalue.current_fn_registers + 1 + i) * 8)).encode_mr(out); // move to new stack
+                    } else {
+                        var builder = X64InstructionBuilder.new(MOV).r64bit().extRM()
+                            .reg(destreg).rm(R14).rmmode(X64InstructionBuilder.RMMode.RM); // mov to new register
+                        if (destreg > 7) {
+                            builder = builder.extreg();
+                        }
+                        try builder.encode_rm(out);
+                    }
+                    i += 1;
+                }
+                var offset = out.items.len;
+                try out.appendSlice(&[_]u8{
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r15, smthsmthsmth
+                    0x41, 0xff, 0xd7, // call r15
+                });
+                // restore CPU registers
+                for (0..cvalue.current_fn_registers) |regnum| {
+                    if (regnum > UsableCPURegs) {
+                        break;
+                    }
+                    var reg = @min(UsableCPURegs, cvalue.current_fn_registers) - regnum;
+                    var rreg = to_real_reg(reg);
+                    if (rreg > 7) {
+                        try out.append(X64InstructionBuilder.REX_BYTE | @intFromEnum(X64InstructionBuilder.Flag.B));
+                    }
+                    try out.append(0x58 | @as(u8, @intCast(rreg & 0b111))); // pop reg
+                }
+                return JmpFix{ .label = cvalue.label, .fixat = offset };
             },
             else => @panic("Not yet supported"),
         }
@@ -263,7 +343,8 @@ const RBP: u8 = 0b101;
 const R14: u8 = 0b1110;
 const R15: u8 = 0b1111;
 
-const MaxReg = 13;
+const MaxCPUReg = 13;
+const UsableCPURegs = 11;
 const MOV_MIMM8: u8 = 0xC6;
 const MOV_RR_MR: u8 = 0x89;
 const MOV_RR_RM: u8 = 0x8B;
@@ -311,19 +392,24 @@ fn u64_to_i32_offset(int: u64) i32 {
     return -@as(i32, @bitCast(@as(u32, @intCast(int))));
 }
 
-fn copy_virtual_register_to_cpu_register(from: u64, to: u8, out: *std.ArrayList(u8)) !void {
-    var reg = from;
-    if (reg > 3) {
-        reg += 2;
+fn to_real_reg(r: u64) u64 {
+    if (r > 3) {
+        return r + 2;
     }
-    if (reg > MaxReg) {
+    return r;
+}
+
+fn copy_virtual_register_to_cpu_register(from: u64, to: u8, out: *std.ArrayList(u8)) !void {
+    var reg = to_real_reg(from);
+
+    if (reg > MaxCPUReg) {
         var b = X64InstructionBuilder.new(MOV)
             .extreg()
             .r64bit()
             .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
             .reg(to)
             .rm(RBP)
-            .disp32(u64_to_i32_offset(reg - MaxReg - 1) * 8);
+            .disp32(u64_to_i32_offset(reg - MaxCPUReg - 1) * 8);
         if (to > 7) {
             b = b.extreg();
         }
@@ -348,18 +434,16 @@ fn copy_virtual_register_to_cpu_register(from: u64, to: u8, out: *std.ArrayList(
 // TODO: Check if R12 must be skipped....
 
 fn copy_cpu_register_to_virtual_register(to: u64, from: u8, out: *std.ArrayList(u8)) !void {
-    var reg = to;
-    if (reg > 3) {
-        reg += 2;
-    }
-    if (reg > MaxReg) {
+    var reg = to_real_reg(to);
+
+    if (reg > MaxCPUReg) {
         var b = X64InstructionBuilder.new(MOV)
             .extreg()
             .r64bit()
             .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
             .reg(from)
             .rm(RBP)
-            .disp32(u64_to_i32_offset(reg - MaxReg - 1) * 8);
+            .disp32(u64_to_i32_offset(reg - MaxCPUReg - 1) * 8);
         if (from > 7) {
             b = b.extreg();
         }
@@ -390,18 +474,16 @@ fn get_or_load_register15(reg: u64, out: *std.ArrayList(u8)) !u8 {
 }
 
 fn get_or_load_to_register(reg: u64, realreg: u8, out: *std.ArrayList(u8)) !u8 {
-    var rreg = reg;
-    if (rreg > 3) {
-        rreg += 2;
-    }
-    if (rreg > MaxReg) {
+    var rreg = to_real_reg(reg);
+
+    if (rreg > MaxCPUReg) {
         _ = try X64InstructionBuilder.new(MOV)
             .extreg()
             .r64bit()
             .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
             .reg(realreg)
             .rm(RBP)
-            .disp32(u64_to_i32_offset(rreg - MaxReg - 1) * 8)
+            .disp32(u64_to_i32_offset(rreg - MaxCPUReg - 1) * 8)
             .encode_rm(out);
         return realreg;
     }
@@ -409,18 +491,16 @@ fn get_or_load_to_register(reg: u64, realreg: u8, out: *std.ArrayList(u8)) !u8 {
 }
 
 fn restore_if_needed(corgreg: u64, reg: u8, out: *std.ArrayList(u8)) !void {
-    var orgreg = corgreg;
-    if (orgreg > 3) {
-        orgreg += 2;
-    }
-    if (orgreg > MaxReg) {
+    var orgreg = to_real_reg(corgreg);
+
+    if (orgreg > MaxCPUReg) {
         _ = try X64InstructionBuilder.new(MOV)
             .extreg()
             .r64bit()
             .rmmode(X64InstructionBuilder.RMMode.SIB_DISP32)
             .reg(reg)
             .rm(RBP)
-            .disp32(u64_to_i32_offset((orgreg - MaxReg - 1) * 8))
+            .disp32(u64_to_i32_offset((orgreg - MaxCPUReg - 1) * 8))
             .encode_mr(out);
     }
 }
@@ -616,32 +696,25 @@ const X64InstructionBuilder = struct {
             b = b.r64bit();
         }
         if (b._modrm) |m| {
-            var rreg = m.modreg orelse 0;
-            if (rreg > 3) {
-                rreg += 2;
-            }
+            var rreg = to_real_reg(m.modreg orelse 0);
+
             if (rreg > 7) {
                 b = b.extreg();
             }
-            var rrm = m.modrm orelse 0;
-            if (rrm > 3) {
-                rreg += 2;
-            }
+            var rrm = to_real_reg(m.modrm orelse 0);
             if (rrm > 7) {
                 b = b.extRM();
             }
-            var rdest = destination;
-            if (destination > 3) {
-                rdest += 2;
-            }
-            if (rreg <= MaxReg and rrm <= MaxReg) {
+            var rdest = to_real_reg(destination);
+
+            if (rreg <= MaxCPUReg and rrm <= MaxCPUReg) {
                 if (rdest == rreg) {
                     try b.reg(rreg).rm(rrm).encode_mr(out);
                 } else {
                     try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
                     try b.reg(R14).rm(rrm).encode_rm(out);
                 }
-            } else if (rreg <= MaxReg) {
+            } else if (rreg <= MaxCPUReg) {
                 try copy_virtual_register_to_cpu_register(m.modrm orelse 0, R15, out);
                 if (rdest == rreg) {
                     try b.reg(rreg).rm(R15).encode_mr(out);
@@ -650,7 +723,7 @@ const X64InstructionBuilder = struct {
                     try b.reg(R14).rm(R15).encode_rm(out);
                     try copy_cpu_register_to_virtual_register(destination, R14, out);
                 }
-            } else if (rrm <= MaxReg) {
+            } else if (rrm <= MaxCPUReg) {
                 try copy_virtual_register_to_cpu_register(m.modreg orelse 0, R14, out);
                 try b.reg(R14).rm(rrm).encode_rm(out);
                 try copy_cpu_register_to_virtual_register(destination, R14, out);
@@ -747,7 +820,11 @@ pub fn main() !void {
     try ir.append(.{ .Label = .{ .name = 2 } });
     try ir.append(.Yield);
     try ir.append(.{ .Add = .{ .left = 21, .right = 22, .dest = 0 } });
+    try ir.append(.{ .CallFn = .{ .label = 3, .current_fn_registers = 123, .args = &[_]u64{ 0, 0, 0, 22 } } });
     try ir.append(.{ .FnEpilogue = .{ .registers = 123 } });
+    try ir.append(.Return);
+    try ir.append(.{ .Label = .{ .name = 3 } });
+    try ir.append(.Yield);
     try ir.append(.Return);
 
     var compiler = Compiler.new(std.heap.page_allocator, &ir);
