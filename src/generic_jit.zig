@@ -22,7 +22,7 @@ fn readNum(comptime str: []const u8, comptime offset: *usize) comptime_int {
     return num;
 }
 
-fn instgen(comptime sstr: []const u8) type {
+pub fn instgen(comptime sstr: []const u8) type {
     comptime var count = 0;
     @setEvalBranchQuota(2000000);
     {
@@ -64,17 +64,27 @@ fn instgen(comptime sstr: []const u8) type {
 
     const StartWrite = struct {
         const Self = @This();
-        fn write(_: *const Self, _: *std.ArrayList(u8), _: [count]u64) !ContinueWrite {
-            return .{ .began = 0, .written = 0 };
+        fn write(_: *const Self, c: ContinueWrite, _: *std.ArrayList(u8), _: [count]u64) !ContinueWrite {
+            return c;
         }
     };
+
     const WriteTypes = struct {
-        fn NoopWriter(comptime Prev: type) type {
+        fn FirstCall(comptime Prev: type) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
                 fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    return self.prev.write(out, args);
+                    return self.prev.write(.{ .began = 0, .written = 0 }, out, args);
+                }
+            };
+        }
+        fn NoopWriter(comptime Prev: type) type {
+            return struct {
+                const Self = @This();
+                prev: Prev = Prev{},
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    return self.prev.write(c, out, args);
                 }
             };
         }
@@ -84,14 +94,14 @@ fn instgen(comptime sstr: []const u8) type {
                 prev: Prev = Prev{},
                 cond: Cond = Cond{},
                 otherwise: Otherwise = Otherwise{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    var old: ContinueWrite = try self.prev.write(out, args);
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    var old: ContinueWrite = try self.prev.write(c, out, args);
                     const mask = ((1 << @intCast(Stop - Start)) - 1) << @intCast(Start);
                     const condwrite = args[ArgNum] & mask != 0;
                     if (condwrite) {
-                        old = try self.cond.write(out, args);
+                        old = try self.cond.write(old, out, args);
                     } else {
-                        old = try self.otherwise.write(out, args);
+                        old = try self.otherwise.write(old, out, args);
                     }
                     return old;
                 }
@@ -102,8 +112,8 @@ fn instgen(comptime sstr: []const u8) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    const old: ContinueWrite = try self.prev.write(out, args);
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    const old: ContinueWrite = try self.prev.write(c, out, args);
                     return try old.pushByte(Val, out);
                 }
             };
@@ -114,8 +124,8 @@ fn instgen(comptime sstr: []const u8) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    var old: ContinueWrite = try self.prev.write(out, args);
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    var old: ContinueWrite = try self.prev.write(c, out, args);
                     for (Start..Stop) |idx| {
                         old = try old.pushBit(@intCast(args[ArgNum] >> @intCast(idx) & 1), out);
                     }
@@ -128,8 +138,8 @@ fn instgen(comptime sstr: []const u8) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    var old = try self.prev.write(out, args);
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    var old = try self.prev.write(c, out, args);
                     var arg: *const [8]u8 = @ptrCast(&args[ArgNum]);
                     for (Start..Stop) |idx| {
                         old = try old.pushByte(arg[idx], out);
@@ -143,8 +153,8 @@ fn instgen(comptime sstr: []const u8) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
-                    const old: ContinueWrite = try self.prev.write(out, args);
+                fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                    const old: ContinueWrite = try self.prev.write(c, out, args);
                     return old.pushBit(Bit, out);
                 }
             };
@@ -152,7 +162,7 @@ fn instgen(comptime sstr: []const u8) type {
     };
 
     var iidx: usize = 0;
-    return struct {
+    const Template = struct {
         fn recursive_instgen(comptime str: []const u8, comptime argcount: comptime_int, comptime offset: *usize, comptime expect_closing: bool) type {
 
             // instgen format:
@@ -252,10 +262,198 @@ fn instgen(comptime sstr: []const u8) type {
             return writer;
         }
     }.recursive_instgen(sstr, count, &iidx, false);
+
+    return WriteTypes.FirstCall(Template);
 }
 
 const mov = instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|101)$2[0-4]"){};
 const push = instgen("{1[3-4]=x41}(01010|@1[0-3])"){};
+
+pub const PartialRegister = enum(u8) {
+    B1 = 0b10000000,
+    B2 = 0b01000000,
+    B3 = 0b00100000,
+    B4 = 0b00010000,
+    B5 = 0b00001000,
+    B6 = 0b00000100,
+    B7 = 0b00000010,
+    B8 = 0b00000001,
+    W1 = 0b11000000,
+    W2 = 0b00110000,
+    W3 = 0b00001100,
+    W4 = 0b00000011,
+    DW1 = 0b11110000,
+    DW2 = 0b00001111,
+    QW = 0b11111111,
+
+    fn popCount(self: PartialRegister) usize {
+        return @popCount(@intFromEnum(self));
+    }
+
+    fn ctz(self: PartialRegister) usize {
+        return @ctz(@intFromEnum(self));
+    }
+
+    fn clz(self: PartialRegister) usize {
+        return @clz(@intFromEnum(self));
+    }
+};
+
+pub const BiOp = enum {
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    MOD,
+    SHIFT_L,
+    SHIFT_R,
+    XOR,
+    OR,
+    AND,
+    EQ,
+    NEQ,
+    GEQ,
+    GT,
+};
+
+pub const Label = struct {
+    name: u64,
+    known_at_offset: ?u64,
+};
+
+pub const LabelFix = struct {
+    compiler_info: u64,
+    name: u64,
+    at_location: u64,
+};
+
+pub const FnData = struct {
+    name: u64,
+    registers_required: u64,
+    max_call_arg_registers: u64,
+    max_call_return_registers: u64,
+};
+
+pub const ArgRegister = struct {
+    number: u64,
+    part: PartialRegister = PartialRegister.QW,
+};
+
+pub const Arch = struct {
+    ptr: *anyopaque,
+    loadVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
+    storeVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+
+    loadSavedVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
+    restoreVirtualRegisters: *const fn (self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void,
+    saveVirtualRegisters: *const fn (self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void,
+
+    allocateReturnRegisters: *const fn (self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    storeToArgRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    storeToReturnRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+
+    loadconst: *const fn (self: *anyopaque, val: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64,
+    biop: *const fn (self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
+    jmpif: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
+    jmp: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
+    call: *const fn (self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
+    yield: *const fn (self: *anyopaque, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+
+    fnprologue: *const fn (self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    fnepilogue: *const fn (self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+};
+
+pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
+    const Caster = struct {
+        fn loadVirtualRegister(self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.loadVirtualRegister(part, number, out);
+        }
+        fn storeVirtualRegister(self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.storeVirtualRegister(part, loaded_at, number, out);
+        }
+
+        fn loadSavedVirtualRegister(self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.loadSavedVirtualRegister(part, number, out);
+        }
+        fn restoreVirtualRegisters(self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.restoreVirtualRegisters(out);
+        }
+        fn saveVirtualRegisters(self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.saveVirtualRegisters(out);
+        }
+
+        fn allocateReturnRegisters(self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.allocateReturnRegisters(count, out);
+        }
+        fn storeToArgRegister(self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.storeToArgRegister(part, loaded_at, number, out);
+        }
+        fn storeToReturnRegister(self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.storeToReturnRegister(part, loaded_at, number, out);
+        }
+
+        fn loadconst(self: *anyopaque, val: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64 {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.loadconst(val, number, out);
+        }
+        fn biop(self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.biop(operation, left, right, dest, out);
+        }
+        fn jmpif(self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.jmpif(label, out);
+        }
+        fn jmp(self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.jmp(label, out);
+        }
+        fn call(self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.call(func, out);
+        }
+        fn yield(self: *anyopaque, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.yield(callback, out);
+        }
+
+        fn fnprologue(self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.fnprologue(data, out);
+        }
+        fn fnepilogue(self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.fnepilogue(data, out);
+        }
+    };
+    return Arch{
+        .ptr = @ptrCast(ptr),
+        .loadVirtualRegister = Caster.loadVirtualRegister,
+        .storeVirtualRegister = Caster.storeVirtualRegister,
+        .loadSavedVirtualRegister = Caster.loadSavedVirtualRegister,
+        .restoreVirtualRegisters = Caster.restoreVirtualRegisters,
+        .saveVirtualRegisters = Caster.saveVirtualRegisters,
+        .allocateReturnRegisters = Caster.allocateReturnRegisters,
+        .storeToArgRegister = Caster.storeToArgRegister,
+        .storeToReturnRegister = Caster.storeToReturnRegister,
+        .loadconst = Caster.loadconst,
+        .biop = Caster.biop,
+        .jmpif = Caster.jmpif,
+        .jmp = Caster.jmp,
+        .call = Caster.call,
+        .yield = Caster.yield,
+        .fnprologue = Caster.fnprologue,
+        .fnepilogue = Caster.fnepilogue,
+    };
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
