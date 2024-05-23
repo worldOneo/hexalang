@@ -74,7 +74,7 @@ pub fn instgen(comptime sstr: []const u8) type {
             return struct {
                 const Self = @This();
                 prev: Prev = Prev{},
-                fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
+                pub fn write(self: *const Self, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
                     return self.prev.write(.{ .began = 0, .written = 0 }, out, args);
                 }
             };
@@ -329,8 +329,13 @@ pub const LabelFix = struct {
 
 pub const FnData = struct {
     name: u64,
+    /// The number of registers required for the return value
+    return_value_registers: u64,
+    /// The number of registers required to store the local values of this function
     registers_required: u64,
+    /// The maximum number of additional registers required for calling another function
     max_call_arg_registers: u64,
+    /// The maximum number of additional registers required for receiving the return value of another function
     max_call_return_registers: u64,
 };
 
@@ -344,15 +349,16 @@ pub const Arch = struct {
     loadVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
     storeVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
 
-    loadSavedVirtualRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
-    restoreVirtualRegisters: *const fn (self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void,
+    loadSavedVirtualRegister: *const fn (self: *anyopaque, count: u64, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
+    restoreVirtualRegisters: *const fn (self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator!void,
     saveVirtualRegisters: *const fn (self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void,
 
-    allocateReturnRegisters: *const fn (self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    allocateReturnRegisters: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     storeToArgRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     storeToReturnRegister: *const fn (self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    loadFromReturnRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
 
-    loadconst: *const fn (self: *anyopaque, val: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64,
+    loadconst: *const fn (self: *anyopaque, val: u64, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64,
     biop: *const fn (self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
     jmpif: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     jmp: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
@@ -378,18 +384,20 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.loadSavedVirtualRegister(part, number, out);
         }
-        fn restoreVirtualRegisters(self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void {
+
+        fn restoreVirtualRegisters(self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator!void {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.restoreVirtualRegisters(out);
-        }
-        fn saveVirtualRegisters(self: *anyopaque, out: *std.ArrayList(u8)) std.mem.Allocator!void {
-            var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.saveVirtualRegisters(out);
+            return trueSelf.restoreVirtualRegisters(count, out);
         }
 
-        fn allocateReturnRegisters(self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+        fn saveVirtualRegisters(self: *anyopaque, count: u64, out: *std.ArrayList(u8)) std.mem.Allocator!void {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.allocateReturnRegisters(count, out);
+            return trueSelf.saveVirtualRegisters(count, out);
+        }
+
+        fn allocateReturnRegisters(self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.allocateReturnRegisters(currentFn, callFn, out);
         }
         fn storeToArgRegister(self: *anyopaque, part: PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             var trueSelf: *Impl = @ptrCast(self);
@@ -399,10 +407,14 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.storeToReturnRegister(part, loaded_at, number, out);
         }
-
-        fn loadconst(self: *anyopaque, val: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64 {
+        fn loadFromReturnRegister(self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.loadconst(val, number, out);
+            return trueSelf.loadFromReturnRegister(part, number, out);
+        }
+
+        fn loadconst(self: *anyopaque, val: u64, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64 {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.loadconst(val, part, number, out);
         }
         fn biop(self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
             var trueSelf: *Impl = @ptrCast(self);
@@ -452,6 +464,124 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
         .yield = Caster.yield,
         .fnprologue = Caster.fnprologue,
         .fnepilogue = Caster.fnepilogue,
+    };
+}
+
+pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type {
+    return struct {
+        const ManagedRegister = struct {
+            next: ?*ManagedRegister = null,
+            prev: ?*ManagedRegister = null,
+            idx: usize = 0,
+            part: PartialRegister = 0,
+            vreg: u64 = 0,
+        };
+        const Self = @This();
+
+        pub const Iter = struct {
+            _next: ?*ManagedRegister,
+
+            pub fn next(self: *Iter) ?struct { idx: u64, vreg: u64, part: PartialRegister } {
+                if (self._next) |n| {
+                    self._next = n.next;
+                    return .{ .idx = n.idx, .vreg = n.vreg, .part = n.part };
+                }
+                return null;
+            }
+        };
+
+        usedregs: [N]ManagedRegister = .{.{}},
+        head: ?*ManagedRegister = null,
+        tail: ?*ManagedRegister = null,
+        freeregs: [N]usize = .{0},
+        freeregidx: usize = 0,
+
+        fn init() Self {
+            var s: Self = .{};
+            for (Registers, 0..) |_, i| {
+                s.freeregs[N - i - 1] = i;
+            }
+            s.freeregidx = N;
+            return s;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.* = self.init();
+        }
+
+        pub fn claimRegister(self: *Self, part: PartialRegister, vreg: u64) struct { claimed: u64, mustStore: ?struct { vreg: u64, part: PartialRegister } } {
+            if (self.getLoadedAt(vreg, part)) |idx| {
+                self.touchRegister(idx);
+                return .{ .claimed = idx, .mustStore = null };
+            }
+            if (self.freeregidx > 0) {
+                var idx = self.freeregs[self.freeregidx - 1];
+                self.freeregidx -= 1;
+                self.prependRegister(&self.usedregs[idx]);
+                self.usedregs[idx].part = part;
+                self.usedregs[idx].vreg = vreg;
+                return .{ .claimed = idx, .mustStore = null };
+            }
+            if (self.tail) |*tail| {
+                self.prev = tail.prev;
+                var oldreg = tail.vreg;
+                var oldpart = tail.part;
+                tail.vreg = vreg;
+                tail.part = part;
+                return .{ .claimed = tail.idx, .mustStore = .{ .reg = oldreg, .part = oldpart } };
+            }
+            unreachable;
+        }
+
+        fn unlinkRegister(self: *Self, reg: *ManagedRegister) void {
+            if (reg.next) |*next| {
+                next.prev = reg.prev;
+            } else {
+                self.tail = reg.prev;
+            }
+            if (reg.prev) |*prev| {
+                prev.next = reg.next;
+            } else {
+                self.head = reg.next;
+            }
+        }
+
+        fn prependRegister(self: *Self, reg: *ManagedRegister) void {
+            if (self.head) |*head| {
+                head.prev = reg;
+                reg.next = head;
+            } else {
+                self.tail = reg;
+            }
+            self.head = reg;
+        }
+
+        pub fn returnRegister(self: *Self, idx: u64) void {
+            var reg: *ManagedRegister = &self.usedregs[idx];
+            self.unlinkRegister(reg);
+            self.freeregs[self.freeregidx - 1] = reg.idx;
+            self.freeregidx -= 1;
+        }
+
+        pub fn touchRegister(self: *Self, idx: u64) void {
+            var reg: *ManagedRegister = &self.usedregs[idx];
+            self.unlinkRegister(reg);
+            self.prependRegister(reg);
+        }
+
+        pub fn iter(self: *Self) Iter {
+            return Self.Iter{ ._next = self.head };
+        }
+
+        pub fn getLoadedAt(self: *Self, vreg: u64, part: PartialRegister) ?u64 {
+            var _iter = self.iter();
+            while (_iter.next()) |node| {
+                if (node.vreg == vreg and node.part == part) {
+                    return node.idx;
+                }
+            }
+            return null;
+        }
     };
 }
 
