@@ -269,6 +269,13 @@ pub fn instgen(comptime sstr: []const u8) type {
 const mov = instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|101)$2[0-4]"){};
 const push = instgen("{1[3-4]=x41}(01010|@1[0-3])"){};
 
+pub const OpSize = enum(u8) {
+    B = 0b00000001,
+    W = 0b00000011,
+    DW = 0b00001111,
+    QW = 0b11111111,
+};
+
 pub const PartialRegister = enum(u8) {
     B1 = 0b10000000,
     B2 = 0b01000000,
@@ -359,7 +366,7 @@ pub const Arch = struct {
     loadFromReturnRegister: *const fn (self: *anyopaque, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
 
     loadconst: *const fn (self: *anyopaque, val: u64, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64,
-    biop: *const fn (self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
+    biop: *const fn (self: *anyopaque, operation: BiOp, part: OpSize, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
     jmpif: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     jmp: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     call: *const fn (self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
@@ -416,9 +423,9 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.loadconst(val, part, number, out);
         }
-        fn biop(self: *anyopaque, operation: BiOp, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+        fn biop(self: *anyopaque, operation: BiOp, part: OpSize, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.biop(operation, left, right, dest, out);
+            return trueSelf.biop(operation, part, left, right, dest, out);
         }
         fn jmpif(self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
             var trueSelf: *Impl = @ptrCast(self);
@@ -509,10 +516,16 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
             self.* = self.init();
         }
 
-        pub fn claimRegister(self: *Self, part: PartialRegister, vreg: u64) struct { claimed: u64, mustStore: ?struct { vreg: u64, part: PartialRegister } } {
+        const RegisterClaim = struct {
+            claimed: u64,
+            loaded: bool = false,
+            mustStore: ?struct { vreg: u64, part: PartialRegister },
+        };
+
+        pub fn claimRegister(self: *Self, part: PartialRegister, vreg: u64) RegisterClaim {
             if (self.getLoadedAt(vreg, part)) |idx| {
                 self.touchRegister(idx);
-                return .{ .claimed = idx, .mustStore = null };
+                return .{ .claimed = idx, .loaded = true, .mustStore = null };
             }
             if (self.freeregidx > 0) {
                 var idx = self.freeregs[self.freeregidx - 1];
