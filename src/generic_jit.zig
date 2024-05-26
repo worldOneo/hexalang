@@ -435,9 +435,9 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.jmp(label, out);
         }
-        fn call(self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+        fn call(self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.call(func, out);
+            return trueSelf.call(currentFn, callFn, out);
         }
         fn yield(self: *anyopaque, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             var trueSelf: *Impl = @ptrCast(self);

@@ -5,6 +5,20 @@ const std = @import("std");
 // Use RSP and RBP (4,5) as stack registers but stack grows upwards for resizing
 // Use R11 as yield payload
 // Use R12 for temporary values
+//
+//
+// Stack layout
+// ...
+// nextFn local 1
+// nextFn Arg N
+// ...
+// nextFn Arg 1
+// nextFn ret N
+// ...
+// nextFn ret 1
+// return addr
+// prevFn local N
+// ...
 const X86_64jit = struct {
     const TempCPURegisters = []u64{ 0, 1, 2, 3, 6, 7, 8, 9, 10 };
     const Registers = jit.LRURegisterAllocator(TempCPURegisters.len, TempCPURegisters);
@@ -101,11 +115,11 @@ const X86_64jit = struct {
     }
 
     pub fn loadFromReturnRegister(self: *X86_64jit, currentFn: jit.FnData, _: jit.FnData, part: jit.PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
-        return self.loadVirtualRegister(part, currentFn.registers_required + number, out);
+        return self.loadVirtualRegister(part, currentFn.registers_required + 1 + number, out);
     }
 
     pub fn storeToArgRegister(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, part: jit.PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        return self.storeVirtualRegister(part, loaded_at, currentFn.registers_required + callFn.return_value_registers + number, out);
+        return self.storeVirtualRegister(part, loaded_at, currentFn.registers_required + 1 + callFn.return_value_registers + number, out);
     }
 
     pub fn storeToReturnRegister(_: *X86_64jit, currentFn: jit.FnData, part: jit.PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
@@ -161,13 +175,17 @@ const X86_64jit = struct {
         _ = try aluOp.write(out, .{ isWord, @as(u64, @intCast(@intFromEnum(part))), dest, right, opcode, maybeByteOp });
     }
 
-    fn jmpif(_: *X86_64jit, label: jit.Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
-        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+    fn jmpif(self: *X86_64jit, label: jit.Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
         const testreg = jit.instgen("(01001@1[3-4]0@1[3-4])x85(11@1[0-3]@1[0-3])"){};
         const skipbranch = jit.instgen("x74x0d"){};
-        const jmpr12 = jit.instgen("x41xffxe4"){};
         _ = try testreg.write(out, .{reg});
         _ = try skipbranch.write(out, .{});
+        return self.jmp(label, out);
+    }
+
+    fn jmp(_: *X86_64jit, label: jit.Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
+        const jmpr12 = jit.instgen("x41xffxe4"){};
+        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
         _ = try movabsq.write(out, .{ 12, label.known_at_offset orelse 0 });
         _ = try jmpr12.write(out, .{});
@@ -182,8 +200,25 @@ const X86_64jit = struct {
             };
         }
     }
-    fn jmp(self: *X86_64jit, label: jit.Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
-    fn call(self: *X86_64jit, func: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
+
+    fn call(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
+        const lear12rip = jit.instgen("x4cx8dx25x16x00x00x00"){};
+        _ = try lear12rip.write(out, .{});
+        _ = try self.storeVirtualRegister(jit.PartialRegister.QW, 12, currentFn.registers_required + 1, out);
+        const jmpr12 = jit.instgen("x41xffxe4"){};
+        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+        const offset = out.items.len;
+        _ = try movabsq.write(out, .{ 12, 0 });
+        _ = try jmpr12.write(out, .{});
+        return jit.LabelFix{
+            .at_location = offset,
+            .compiler_info = 1,
+            .name = callFn.name,
+        };
+    }
+
+    fn fnreturn(self: *X86_64jit, currentFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
+
     fn yield(self: *X86_64jit, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     fn fnprologue(self: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     fn fnepilogue(self: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
