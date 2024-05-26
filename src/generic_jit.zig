@@ -367,7 +367,7 @@ pub const Arch = struct {
 
     loadconst: *const fn (self: *anyopaque, val: u64, part: PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64,
     biop: *const fn (self: *anyopaque, operation: BiOp, part: OpSize, left: u64, right: u64, dest: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
-    jmpif: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
+    jmpif: *const fn (self: *anyopaque, label: Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     jmp: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     call: *const fn (self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     yield: *const fn (self: *anyopaque, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
@@ -427,9 +427,9 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.biop(operation, part, left, right, dest, out);
         }
-        fn jmpif(self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+        fn jmpif(self: *anyopaque, label: Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
             var trueSelf: *Impl = @ptrCast(self);
-            return trueSelf.jmpif(label, out);
+            return trueSelf.jmpif(label, reg, out);
         }
         fn jmp(self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
             var trueSelf: *Impl = @ptrCast(self);

@@ -161,12 +161,33 @@ const X86_64jit = struct {
         _ = try aluOp.write(out, .{ isWord, @as(u64, @intCast(@intFromEnum(part))), dest, right, opcode, maybeByteOp });
     }
 
-    fn jmpif(self: *X86_64jit, label: jit.Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
+    fn jmpif(_: *X86_64jit, label: jit.Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
+        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+        const testreg = jit.instgen("(01001@1[3-4]0@1[3-4])x85(11@1[0-3]@1[0-3])"){};
+        const skipbranch = jit.instgen("x74x0d"){};
+        const jmpr12 = jit.instgen("x41xffxe4"){};
+        _ = try testreg.write(out, .{reg});
+        _ = try skipbranch.write(out, .{});
+        const offset = out.items.len;
+        _ = try movabsq.write(out, .{ 12, label.known_at_offset orelse 0 });
+        _ = try jmpr12.write(out, .{});
+
+        if (label.known_at_offset) |_| {
+            return null;
+        } else {
+            return jit.LabelFix{
+                .at_location = offset,
+                .compiler_info = 0,
+                .name = label.name,
+            };
+        }
+    }
     fn jmp(self: *X86_64jit, label: jit.Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
     fn call(self: *X86_64jit, func: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
     fn yield(self: *X86_64jit, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     fn fnprologue(self: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     fn fnepilogue(self: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+    fn fixjmp(self: *X86_64jit, jmpfix: jit.LabelFix, absolutreallocation: u64) void {}
 };
 
 fn create_x86_64_arch(allocator: std.mem.Allocator) jit.Arch {
