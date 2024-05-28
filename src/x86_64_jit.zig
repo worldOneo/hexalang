@@ -217,7 +217,15 @@ const X86_64jit = struct {
         };
     }
 
-    fn fnreturn(self: *X86_64jit, currentFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {}
+    fn fnreturn(_: *X86_64jit, currentFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
+        const movQW = jit.instgen("(01001|@1[3-4]|00)x8b(10|@1[0-3]|100)x24$2[0-4]"){};
+        const jmpr12 = jit.instgen("x41xffxe4"){};
+
+        const offset = @as(u64, @bitCast(-@as(i32, @intCast(currentFn.return_value_registers)) - 1));
+        _ = try movQW.write(out, .{ 12, offset });
+        _ = try jmpr12.write(out, .{});
+        return null;
+    }
 
     fn yield(self: *X86_64jit, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     fn fnprologue(self: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}

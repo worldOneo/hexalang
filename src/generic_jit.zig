@@ -372,8 +372,27 @@ pub const Arch = struct {
     call: *const fn (self: *anyopaque, func: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     yield: *const fn (self: *anyopaque, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
 
+    fnreturn: *const fn (self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     fnprologue: *const fn (self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     fnepilogue: *const fn (self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+
+    /// Clears the idea of a loaded register
+    /// this could be because of a scope ending
+    /// i.e.:
+    /// for
+    ///
+    /// if condition {
+    ///     a = b + c
+    /// }
+    ///
+    /// the to-ir-compiler must emite
+    ///
+    /// invalidate a
+    /// invalidate b
+    /// invalidate c
+    ///
+    /// TODO: Add to-ir-compiler hint to communicate when it is valid to ignore invalidation
+    invalidateLoadedReg: *const fn (self: *anyopaque, currentfn: FnData, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
 };
 
 pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
@@ -444,6 +463,11 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             return trueSelf.yield(callback, out);
         }
 
+        fn fnreturn(self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.fnprologue(currentFn, out);
+        }
+
         fn fnprologue(self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.fnprologue(data, out);
@@ -451,6 +475,11 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
         fn fnepilogue(self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             var trueSelf: *Impl = @ptrCast(self);
             return trueSelf.fnepilogue(data, out);
+        }
+
+        fn invalidateLoadedReg(self: *anyopaque, currentfn: FnData, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            var trueSelf: *Impl = @ptrCast(self);
+            return trueSelf.fnepilogue(currentfn, reg, out);
         }
     };
     return Arch{
