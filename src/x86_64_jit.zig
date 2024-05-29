@@ -255,7 +255,7 @@ const X86_64jit = struct {
         // try_enter:           ; try_enter:
         //   mov r12, rbp       ;   r12 = rbp
         //   add r12, 1234123   ;   r12 += offset
-        //   cmp r12, r11       ;   if(r12 < offset)
+        //   cmp r12, r11       ;   if(r12 > stack_end)
         //   jbe enter          ;   {
         //   xor r14, r14       ;      yield_status = require_more_stack
         //   lea r15, [rip+3]   ;      yield_return = retry
