@@ -152,7 +152,7 @@ const X86_64jit = struct {
         const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|100)x24$2[0-4]"){};
         const f = currentFn;
 
-        var offset = -@as(i64, @intCast(f.return_value_registers + 1 + f.max_call_arg_registers - number));
+        var offset = -@as(i64, @intCast(f.max_call_return_registers + f.registers_required + f.max_call_arg_registers + 1 + number + 1));
         offset += @intCast(7 - part.ctz());
         const u64offset: u64 = @bitCast(offset * 8);
         _ = switch (part.popCount()) {
@@ -231,14 +231,29 @@ const X86_64jit = struct {
     }
 
     pub fn call(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
-        const lear12rip = jit.instgen("x4cx8dx25x16x00x00x00"){};
+        // lea r12, continue
+        // mov [return], r12
+        // sub rbp, notneeded
+        // movabsq r12, function
+        // jmp r12
+        // continue:
+        // add rbp, notneeded
+        const lear12rip = jit.instgen("x4cx8dx25x24x00x00x00"){};
         _ = try lear12rip.write(out, .{});
         _ = try self.storeVirtualRegister(jit.Register{ .function = currentFn, .part = jit.RegisterPart.QW, .number = currentFn.registers_required + 1 }, 12, out);
+
+        const notneeded = ((currentFn.max_call_arg_registers + currentFn.max_call_return_registers) - (callFn.return_value_registers + callFn.arg_registers)) * 8;
+        const subrbp = jit.instgen("x48x81xc5$1[0-4]"){};
+        _ = try subrbp.write(out, .{notneeded});
+
+        const addrbp = jit.instgen("x48x81xed$1[0-4]"){};
         const jmpr12 = jit.instgen("x41xffxe4"){};
         const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
         _ = try movabsq.write(out, .{ 12, 0 });
         _ = try jmpr12.write(out, .{});
+        _ = try addrbp.write(out, .{notneeded});
+
         return jit.LabelFix{
             .at_location = offset,
             .compiler_info = 1,

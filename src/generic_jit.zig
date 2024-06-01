@@ -345,7 +345,9 @@ pub const FnData = struct {
     name: u64,
     /// The number of registers required for the return value
     return_value_registers: u64,
-    /// The number of registers required to store the local values of this function
+    /// The number of registers required for the arguments of the function
+    arg_registers: u64,
+    /// The number of registers required to store the local values of this function (including arg registers)
     registers_required: u64,
     /// The maximum number of additional registers required for calling another function
     max_call_arg_registers: u64,
