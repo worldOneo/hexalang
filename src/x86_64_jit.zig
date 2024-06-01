@@ -125,8 +125,8 @@ const X86_64jit = struct {
         return self.loadVirtualRegister(register, out);
     }
 
-    pub fn restoreVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
-    pub fn saveVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+    pub fn restoreVirtualRegisters(_: *X86_64jit, _: jit.FnData, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+    pub fn saveVirtualRegisters(_: *X86_64jit, _: jit.FnData, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
     pub fn allocateReturnArgRegisters(_: *X86_64jit, _: jit.FnData, _: jit.FnData, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
 
     pub fn loadFromReturnRegister(self: *X86_64jit, currentFn: jit.FnData, _: jit.FnData, part: jit.RegisterPart, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
@@ -138,20 +138,24 @@ const X86_64jit = struct {
     }
 
     pub fn storeToArgRegister(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, part: jit.RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        return self.storeVirtualRegister(part, loaded_at, currentFn.registers_required + 1 + callFn.return_value_registers + number, out);
+        return self.storeVirtualRegister(jit.Register{
+            .part = part,
+            .function = currentFn,
+            .number = currentFn.registers_required + 1 + callFn.return_value_registers + number,
+        }, loaded_at, out);
     }
 
-    pub fn storeToReturnRegister(_: *X86_64jit, register: jit.Register, loaded_at: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    pub fn storeToReturnRegister(_: *X86_64jit, currentFn: jit.FnData, part: jit.RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|100)x24$2[0-4]"){};
         const movDW = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
         const movW = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
         const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|100)x24$2[0-4]"){};
-        const f = register.function;
+        const f = currentFn;
 
-        var offset = -@as(i64, @intCast(f.return_value_registers + 1 + f.max_call_arg_registers + f.max_call_arg_registers - register.number));
-        offset += @intCast(7 - register.part.ctz());
+        var offset = -@as(i64, @intCast(f.return_value_registers + 1 + f.max_call_arg_registers - number));
+        offset += @intCast(7 - part.ctz());
         const u64offset: u64 = @bitCast(offset * 8);
-        _ = switch (register.part.popCount()) {
+        _ = switch (part.popCount()) {
             1 => try movB.write(out, .{ loaded_at, u64offset }),
             2 => try movW.write(out, .{ loaded_at, u64offset }),
             4 => try movDW.write(out, .{ loaded_at, u64offset }),
@@ -246,7 +250,7 @@ const X86_64jit = struct {
         const movQW = jit.instgen("(01001|@1[3-4]|00)x8b(10|@1[0-3]|100)x24$2[0-4]"){};
         const jmpr12 = jit.instgen("x41xffxe4"){};
 
-        const offset = @as(u64, @bitCast(-@as(i32, @intCast(currentFn.return_value_registers)) - 1));
+        const offset = @as(u64, @bitCast(-@as(i64, @intCast(currentFn.return_value_registers + 1)) * 8));
         _ = try movQW.write(out, .{ 12, offset });
         _ = try jmpr12.write(out, .{});
         return null;

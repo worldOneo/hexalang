@@ -364,8 +364,8 @@ pub const Arch = struct {
     restoreVirtualRegisters: *const fn (self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     saveVirtualRegisters: *const fn (self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
 
-    allocateReturnRegisters: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
-    storeToArgRegister: *const fn (self: *anyopaque, currentFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    allocateReturnArgRegisters: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    storeToArgRegister: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     storeToReturnRegister: *const fn (self: *anyopaque, currentFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
     loadFromReturnRegister: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, part: RegisterPart, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64,
 
@@ -374,7 +374,7 @@ pub const Arch = struct {
     jmpif: *const fn (self: *anyopaque, label: Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     jmp: *const fn (self: *anyopaque, label: Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     call: *const fn (self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
-    yield: *const fn (self: *anyopaque, currentFn: FnData, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
+    yield: *const fn (self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
 
     fnreturn: *const fn (self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix,
     fnprologue: *const fn (self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void,
@@ -424,11 +424,11 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
             return trueSelf(self).saveVirtualRegisters(currentFn, out);
         }
 
-        fn allocateReturnRegisters(self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-            return trueSelf(self).allocateReturnRegisters(currentFn, callFn, out);
+        fn allocateReturnArgRegisters(self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            return trueSelf(self).allocateReturnArgRegisters(currentFn, callFn, out);
         }
-        fn storeToArgRegister(self: *anyopaque, currentFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-            return trueSelf(self).storeToArgRegister(currentFn, part, loaded_at, number, out);
+        fn storeToArgRegister(self: *anyopaque, currentFn: FnData, callFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            return trueSelf(self).storeToArgRegister(currentFn, callFn, part, loaded_at, number, out);
         }
         fn storeToReturnRegister(self: *anyopaque, currentFn: FnData, part: RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
             return trueSelf(self).storeToReturnRegister(currentFn, part, loaded_at, number, out);
@@ -452,12 +452,12 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
         fn call(self: *anyopaque, currentFn: FnData, callFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
             return trueSelf(self).call(currentFn, callFn, out);
         }
-        fn yield(self: *anyopaque, currentFn: FnData, callback: *const fn (*anyopaque) void, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-            return trueSelf(self).yield(currentFn, callback, out);
+        fn yield(self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+            return trueSelf(self).yield(currentFn, out);
         }
 
         fn fnreturn(self: *anyopaque, currentFn: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?LabelFix {
-            return trueSelf(self).fnprologue(currentFn, out);
+            return trueSelf(self).fnreturn(currentFn, out);
         }
 
         fn fnprologue(self: *anyopaque, data: FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
@@ -478,7 +478,7 @@ pub fn createJITFrom(comptime Impl: type, ptr: *Impl) Arch {
         .loadSavedVirtualRegister = Caster.loadSavedVirtualRegister,
         .restoreVirtualRegisters = Caster.restoreVirtualRegisters,
         .saveVirtualRegisters = Caster.saveVirtualRegisters,
-        .allocateReturnRegisters = Caster.allocateReturnRegisters,
+        .allocateReturnArgRegisters = Caster.allocateReturnArgRegisters,
         .storeToArgRegister = Caster.storeToArgRegister,
         .storeToReturnRegister = Caster.storeToReturnRegister,
         .loadFromReturnRegister = Caster.loadFromReturnRegister,
