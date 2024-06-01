@@ -29,24 +29,24 @@ const YieldStatus = enum(u8) {
 // prevFn local N
 // ...
 const X86_64jit = struct {
-    const TempCPURegisters = []u64{ 0, 1, 2, 3, 6, 7, 8, 9, 10 };
+    const TempCPURegisters = [_]u64{ 0, 1, 2, 3, 6, 7, 8, 9, 10 };
     const Registers = jit.LRURegisterAllocator(TempCPURegisters.len, TempCPURegisters);
 
     registers: Registers = Registers.init(),
 
-    fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*X86_64jit {
+    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*X86_64jit {
         var ptr = try allocator.create(X86_64jit);
         ptr.* = X86_64jit{};
         return ptr;
     }
 
-    fn maskRegister(reg: u64, part: jit.PartialRegister, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    fn maskRegister(reg: u64, part: jit.RegisterPart, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         // const onlylower32bits = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x89(11|@1[0-3]|@1[0-3])"){};
-        const onlylower16bits = jit.instgen("x66{@1[3-4]=(01000|@1[3-4]|00)}x89(11|@1[0-3]|@1[0-3])"){};
-        const onlylower8bits = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x88(11|@1[0-3]|@1[0-3])"){};
+        const onlylower16bits = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(11|@1[0-3]|@1[0-3])"){};
+        const onlylower8bits = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(11|@1[0-3]|@1[0-3])"){};
         const shr = jit.instgen("(0100100|@1[3-4])xc1(11101|@1[0-3])$2[0-1]"){};
 
-        if (part == jit.PartialRegister.QW) {
+        if (part == jit.RegisterPart.QW) {
             return;
         }
 
@@ -78,90 +78,99 @@ const X86_64jit = struct {
         }
     }
 
-    fn stackRegisterOffset(number: u64) u64 {
-        return number * 8;
-    }
-
-    pub fn loadVirtualRegister(self: *X86_64jit, part: jit.PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+    pub fn loadVirtualRegister(self: *X86_64jit, register: jit.Register, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
         const mov = jit.instgen("(01001|@1[3-4]|00)x8b(10|@1[0-3]|101)$2[0-4]"){};
 
-        const claim = self.registers.claimRegister(part, number);
+        const claim = self.registers.claimRegister(register.part, register.number);
         const destRegister = claim.claimed;
 
         if (claim.mustStore) |old| {
-            try self.storeVirtualRegister(old.part, destRegister, old.vreg, out);
+            try self.storeVirtualRegister(jit.Register{
+                .function = register.function,
+                .number = old.vreg,
+                .part = old.part,
+            }, claim.claimed, out);
         }
         if (claim.loaded) {
             return destRegister;
         }
 
-        const offset = stackRegisterOffset(number);
-        _ = try mov.write(out, .{ destRegister, offset });
-        try maskRegister(destRegister, part, out);
+        const f = register.function;
+        const offset = -@as(i64, @intCast((f.registers_required + f.max_call_arg_registers + f.max_call_return_registers + 1 - register.number))) * 8;
+        const u64offset = @as(u64, @bitCast(offset));
+        _ = try mov.write(out, .{ destRegister, u64offset });
+        try maskRegister(destRegister, register.part, out);
         return destRegister;
     }
 
-    // TODO: Fix inverse access. mov reg, [rbp-offset] because RBP points to the end of the functions stack.
-    pub fn storeVirtualRegister(_: *X86_64jit, part: jit.PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    pub fn storeVirtualRegister(_: *X86_64jit, register: jit.Register, loaded_at: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|101)$2[0-4]"){};
-        const movDW = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
-        const movW = jit.instgen("x66{@1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
-        const movB = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|101)$2[0-4]"){};
-
-        var offset = stackRegisterOffset(number);
-        offset += (7 - part.clz());
-        _ = switch (part.popCount()) {
-            1 => try movB.write(out, .{ loaded_at, offset }),
-            2 => try movW.write(out, .{ loaded_at, offset }),
-            4 => try movDW.write(out, .{ loaded_at, offset }),
-            8 => try movQW.write(out, .{ loaded_at, offset }),
-        };
-    }
-
-    pub fn loadSavedVirtualRegister(self: *X86_64jit, part: jit.PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
-        return self.loadVirtualRegister(part, number, out);
-    }
-
-    pub fn restoreVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator!void {}
-    pub fn saveVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator!void {}
-
-    pub fn allocateReturnRegisters(_: *X86_64jit, _: jit.FnData, callFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        const addRsp = jit.instgen("x48x81xc4@[0-4]"){};
-        _ = try addRsp.write(out, .{(callFn.return_value_registers) * 8});
-    }
-
-    pub fn loadFromReturnRegister(self: *X86_64jit, currentFn: jit.FnData, _: jit.FnData, part: jit.PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
-        return self.loadVirtualRegister(part, currentFn.registers_required + 1 + number, out);
-    }
-
-    pub fn storeToArgRegister(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, part: jit.PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        return self.storeVirtualRegister(part, loaded_at, currentFn.registers_required + 1 + callFn.return_value_registers + number, out);
-    }
-
-    pub fn storeToReturnRegister(_: *X86_64jit, currentFn: jit.FnData, part: jit.PartialRegister, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movDW = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movW = jit.instgen("x66{@1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movB = jit.instgen("{@1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|100)x24$2[0-4]"){};
-
-        var offset = -@as(i64, @intCast(currentFn.return_value_registers)) + number;
-        offset += @intCast(7 - part.clz());
-        const u64offset: u64 = @bitCast(offset);
-        _ = switch (part.popCount()) {
+        const movDW = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
+        const movW = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
+        const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|101)$2[0-4]"){};
+        const f = register.function;
+        var offset = -@as(i64, @intCast((f.registers_required + f.max_call_arg_registers + f.max_call_return_registers + 1 - register.number))) * 8;
+        offset += @intCast(7 - register.part.ctz());
+        const u64offset = @as(u64, @bitCast(offset));
+        _ = switch (register.part.popCount()) {
             1 => try movB.write(out, .{ loaded_at, u64offset }),
             2 => try movW.write(out, .{ loaded_at, u64offset }),
             4 => try movDW.write(out, .{ loaded_at, u64offset }),
             8 => try movQW.write(out, .{ loaded_at, u64offset }),
+            else => unreachable,
         };
     }
 
-    pub fn loadconst(self: *X86_64jit, val: u64, part: jit.PartialRegister, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator!u64 {
+    pub fn loadSavedVirtualRegister(self: *X86_64jit, register: jit.Register, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+        return self.loadVirtualRegister(register, out);
+    }
+
+    pub fn restoreVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+    pub fn saveVirtualRegisters(_: *X86_64jit, _: u64, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+    pub fn allocateReturnArgRegisters(_: *X86_64jit, _: jit.FnData, _: jit.FnData, _: *std.ArrayList(u8)) std.mem.Allocator.Error!void {}
+
+    pub fn loadFromReturnRegister(self: *X86_64jit, currentFn: jit.FnData, _: jit.FnData, part: jit.RegisterPart, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
+        return self.loadVirtualRegister(jit.Register{
+            .function = currentFn,
+            .number = currentFn.registers_required + 1 + number,
+            .part = part,
+        }, out);
+    }
+
+    pub fn storeToArgRegister(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, part: jit.RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+        return self.storeVirtualRegister(part, loaded_at, currentFn.registers_required + 1 + callFn.return_value_registers + number, out);
+    }
+
+    pub fn storeToReturnRegister(_: *X86_64jit, register: jit.Register, loaded_at: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+        const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|100)x24$2[0-4]"){};
+        const movDW = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
+        const movW = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
+        const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|100)x24$2[0-4]"){};
+        const f = register.function;
+
+        var offset = -@as(i64, @intCast(f.return_value_registers + 1 + f.max_call_arg_registers + f.max_call_arg_registers - register.number));
+        offset += @intCast(7 - register.part.ctz());
+        const u64offset: u64 = @bitCast(offset * 8);
+        _ = switch (register.part.popCount()) {
+            1 => try movB.write(out, .{ loaded_at, u64offset }),
+            2 => try movW.write(out, .{ loaded_at, u64offset }),
+            4 => try movDW.write(out, .{ loaded_at, u64offset }),
+            8 => try movQW.write(out, .{ loaded_at, u64offset }),
+            else => unreachable,
+        };
+    }
+
+    pub fn loadconst(self: *X86_64jit, val: u64, register: jit.Register, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
         const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
-        const claim = self.registers.claimRegister(part, number);
+        const claim = self.registers.claimRegister(register.part, register.number);
         if (claim.mustStore) |old| {
-            try self.storeVirtualRegister(old.part, claim.claimed, old.vreg, out);
+            try self.storeVirtualRegister(jit.Register{
+                .function = register.function,
+                .number = old.vreg,
+                .part = old.part,
+            }, claim.claimed, out);
         }
-        _ = try movabsq.write(out, .{val});
+        _ = try movabsq.write(out, .{ claim.claimed, val });
         return claim.claimed;
     }
 
@@ -181,14 +190,14 @@ const X86_64jit = struct {
             jit.BiOp.XOR => 0x32,
             jit.BiOp.SUB => 0x29,
             jit.BiOp.OR => 0x09,
-            _ => unreachable, // TODO: Add the ops where intel was high while designing
+            else => unreachable, // TODO: Add the ops where intel was high while designing
         };
 
         const isWord: u64 = if (part == jit.OpSize.W) 1 else 0;
         const maybeByteOp: u64 = if (part == jit.OpSize.B) opcode - 1 else opcode;
-        //                         |Byte 0x66  ||REX =     64bit+ExtL?+ExtR?                  ExtL+ExtR?                             ||ALU-OP||RM L+R            |
-        const aluOp = jit.instgen("{@1[0-8]=x66}{@2[7-8]=(01001|@4[3-4]|0|@3[3-4]):{@4[3-4]=(0100010|@3[3-4]):{@3[3-4]=(01000001):()}}}@2[0-1](11|@4[0-3]|@3[0-3])"){};
-        _ = try aluOp.write(out, .{ isWord, @as(u64, @intCast(@intFromEnum(part))), dest, right, opcode, maybeByteOp });
+        //                         |Byte 0x66 ||REX =    64bit+ExtL?+ExtR?      | ExtL?+ExtR?           ||ALU-OP||RM L+R            |
+        const aluOp = jit.instgen("{1[0-8]=x66}{2[7-8]=(01001|@4[3-4]|0|@3[3-4]):(01000|@4[3-4]|0|@3[3-4])}@2[0-1](11|@4[0-3]|@3[0-3])"){};
+        _ = try aluOp.write(out, .{ isWord, maybeByteOp, dest, right });
     }
 
     pub fn jmpif(self: *X86_64jit, label: jit.Label, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
@@ -220,7 +229,7 @@ const X86_64jit = struct {
     pub fn call(self: *X86_64jit, currentFn: jit.FnData, callFn: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
         const lear12rip = jit.instgen("x4cx8dx25x16x00x00x00"){};
         _ = try lear12rip.write(out, .{});
-        _ = try self.storeVirtualRegister(jit.PartialRegister.QW, 12, currentFn.registers_required + 1, out);
+        _ = try self.storeVirtualRegister(jit.Register{ .function = currentFn, .part = jit.RegisterPart.QW, .number = currentFn.registers_required + 1 }, 12, out);
         const jmpr12 = jit.instgen("x41xffxe4"){};
         const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
@@ -243,14 +252,14 @@ const X86_64jit = struct {
         return null;
     }
 
-    pub fn yield(_: *X86_64jit, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    pub fn yield(_: *X86_64jit, _: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         const lear15ripadd3 = jit.instgen("x4cx8dx3dx03x00x00x00"){};
         const jmpr13 = jit.instgen("x41xffxe5"){};
         _ = try lear15ripadd3.write(out, .{});
         _ = try jmpr13.write(out, .{});
     }
 
-    fn fnprologue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+    pub fn fnprologue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         // this is the prologue to ensure enough stackspace
         // try_enter:           ; try_enter:
         //   mov r12, rbp       ;   r12 = rbp
@@ -263,16 +272,30 @@ const X86_64jit = struct {
         //   jmp try_enter      ;      retry: goto try_enter
         // enter:               ;   }
         // add rbp, 1234123     ;   rbp += offset
-        const prologue = jit.instgen("49x89xec|x49x81xc4$1[0-4]|x4dx39xdc|x4dx31xf6|x4cx8dx3dx03x00x00x00|x41xffxe5|xebxe2|x48x81xc5$1[0-4]"){};
+        const prologue = jit.instgen("x49x89xec|x49x81xc4$1[0-4]|x4dx39xdc|x4dx31xf6|x4cx8dx3dx03x00x00x00|x41xffxe5|xebxe2|x48x81xc5$1[0-4]"){};
         _ = try prologue.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1) * 8});
     }
-    fn fnepilogue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        const subrbp = jit.instgen("x48x81xed$[0-4]"){};
+    pub fn fnepilogue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+        const subrbp = jit.instgen("x48x81xed$1[0-4]"){};
         _ = try subrbp.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1) * 8});
     }
-    fn fixjmp(self: *X86_64jit, jmpfix: jit.LabelFix, absolutreallocation: u64) void {}
+
+    pub fn invalidateLoadedReg(self: *X86_64jit, currentfn: jit.FnData, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
+        var iter = self.registers.iter();
+        while (iter.next()) |n| {
+            if (n.vreg == reg) {
+                const returned = self.registers.returnRegister(n.idx);
+                _ = try self.storeVirtualRegister(jit.Register{
+                    .function = currentfn,
+                    .number = reg,
+                    .part = returned.part,
+                }, n.idx, out);
+            }
+        }
+    }
+    // fn fixjmp(self: *X86_64jit, jmpfix: jit.LabelFix, absolutreallocation: u64) void {}
 };
 
-fn create_x86_64_arch(allocator: std.mem.Allocator) jit.Arch {
-    return jit.createJITFrom(X86_64jit, X86_64jit.init(allocator));
+pub fn create_x86_64_arch(allocator: std.mem.Allocator) std.mem.Allocator.Error!jit.Arch {
+    return jit.createJITFrom(X86_64jit, try X86_64jit.init(allocator));
 }
