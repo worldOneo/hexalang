@@ -6,7 +6,7 @@ fn isHex(comptime char: u8) bool {
 }
 
 fn fromHex(comptime char: u8) u64 {
-    return @intCast(if (char >= 'a' and char <= 'f') char - 'a' + 9 else char - '0');
+    return @intCast(if (char >= 'a' and char <= 'f') char - 'a' + 10 else char - '0');
 }
 
 fn readNum(comptime str: []const u8, comptime offset: *usize) comptime_int {
@@ -128,7 +128,7 @@ pub fn instgen(comptime sstr: []const u8) type {
                 fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
                     var old: ContinueWrite = try self.prev.write(c, out, args);
                     for (Start..Stop) |idx| {
-                        old = try old.pushBit(@intCast(args[ArgNum] >> @intCast(idx) & 1), out);
+                        old = try old.pushBit(@intCast(args[ArgNum] >> @intCast(Stop - 1 - idx + Start) & 1), out);
                     }
                     return old;
                 }
@@ -272,9 +272,6 @@ pub fn instgen(comptime sstr: []const u8) type {
 
     return WriteTypes.FirstCall(Template);
 }
-
-const mov = instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|101)$2[0-4]"){};
-const push = instgen("{1[3-4]=x41}(01010|@1[0-3])"){};
 
 pub const OpSize = enum(u8) {
     B = 0b00000001,
@@ -629,11 +626,28 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var alloc = gpa.allocator();
     var out = std.ArrayList(u8).init(alloc);
-    _ = try x86_64.create_x86_64_arch(alloc);
-    _ = try mov.write(&out, .{ 0, 0x3039 });
-    _ = try mov.write(&out, .{ 15, 0x3039 });
-    _ = try push.write(&out, .{0});
-    _ = try push.write(&out, .{15});
+    var jit = try x86_64.create_x86_64_arch(alloc);
+    const mainfn = FnData{
+        .arg_registers = 0,
+        .max_call_arg_registers = 1,
+        .max_call_return_registers = 1,
+        .registers_required = 1,
+        .return_value_registers = 1,
+        .name = 0,
+    };
+    const trivial = FnData{
+        .arg_registers = 1,
+        .max_call_arg_registers = 0,
+        .max_call_return_registers = 0,
+        .registers_required = 1,
+        .return_value_registers = 1,
+        .name = 1,
+    };
+    try jit.fnprologue(jit.ptr, mainfn, &out);
+    _ = try jit.call(jit.ptr, mainfn, trivial, &out);
+    const returned = try jit.loadFromReturnRegister(jit.ptr, mainfn, trivial, RegisterPart.QW, 0, &out);
+    try jit.storeToReturnRegister(jit.ptr, mainfn, RegisterPart.QW, returned, 0, &out);
+    try jit.fnepilogue(jit.ptr, mainfn, &out);
     const stdout = std.io.getStdOut().writer();
     for (out.items) |item| {
         std.debug.print("{x:0>2} ", .{item});

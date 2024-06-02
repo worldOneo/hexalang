@@ -165,7 +165,7 @@ const X86_64jit = struct {
     }
 
     pub fn loadconst(self: *X86_64jit, val: u64, register: jit.Register, out: *std.ArrayList(u8)) std.mem.Allocator.Error!u64 {
-        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+        const movabsq = jit.instgen("(0100100|@1[3-4])(10111|@1[0-3])$2[0-8]"){};
         const claim = self.registers.claimRegister(register.part, register.number);
         if (claim.mustStore) |old| {
             try self.storeVirtualRegister(jit.Register{
@@ -214,7 +214,7 @@ const X86_64jit = struct {
 
     pub fn jmp(_: *X86_64jit, label: jit.Label, out: *std.ArrayList(u8)) std.mem.Allocator.Error!?jit.LabelFix {
         const jmpr12 = jit.instgen("x41xffxe4"){};
-        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+        const movabsq = jit.instgen("(0100100|@1[3-4])(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
         _ = try movabsq.write(out, .{ 12, label.known_at_offset orelse 0 });
         _ = try jmpr12.write(out, .{});
@@ -248,7 +248,7 @@ const X86_64jit = struct {
 
         const addrbp = jit.instgen("x48x81xed$1[0-4]"){};
         const jmpr12 = jit.instgen("x41xffxe4"){};
-        const movabsq = jit.instgen("(01001|@1[3-4]|00)(10111|@1[0-3])$2[0-8]"){};
+        const movabsq = jit.instgen("(0100100@1[3-4])(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
         _ = try movabsq.write(out, .{ 12, 0 });
         _ = try jmpr12.write(out, .{});
