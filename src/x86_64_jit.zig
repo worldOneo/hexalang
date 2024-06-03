@@ -110,7 +110,7 @@ const X86_64jit = struct {
         const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|101)$2[0-4]"){};
         const f = register.function;
         var offset = -@as(i64, @intCast((f.registers_required + f.max_call_arg_registers + f.max_call_return_registers + 1 - register.number))) * 8;
-        offset += @intCast(7 - register.part.ctz());
+        offset += @intCast(register.part.clz());
         const u64offset = @as(u64, @bitCast(offset));
         _ = switch (register.part.popCount()) {
             1 => try movB.write(out, .{ loaded_at, u64offset }),
@@ -146,14 +146,14 @@ const X86_64jit = struct {
     }
 
     pub fn storeToReturnRegister(_: *X86_64jit, currentFn: jit.FnData, part: jit.RegisterPart, loaded_at: u64, number: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
-        const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movDW = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movW = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|100)x24$2[0-4]"){};
-        const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|100)x24$2[0-4]"){};
+        const movQW = jit.instgen("(01001|@1[3-4]|00)x89(10|@1[0-3]|101)$2[0-4]"){};
+        const movDW = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
+        const movW = jit.instgen("x66{1[3-4]=(01000|@1[3-4]|00)}x89(10|@1[0-3]|101)$2[0-4]"){};
+        const movB = jit.instgen("{1[3-4]=(01000|@1[3-4]|00)}x88(10|@1[0-3]|101)$2[0-4]"){};
         const f = currentFn;
 
         var offset = -@as(i64, @intCast(f.max_call_return_registers + f.registers_required + f.max_call_arg_registers + 1 + number + 1));
-        offset += @intCast(7 - part.ctz());
+        offset += @intCast(part.clz());
         const u64offset: u64 = @bitCast(offset * 8);
         _ = switch (part.popCount()) {
             1 => try movB.write(out, .{ loaded_at, u64offset }),
@@ -291,7 +291,7 @@ const X86_64jit = struct {
         //   jmp try_enter      ;      retry: goto try_enter
         // enter:               ;   }
         // add rbp, 1234123     ;   rbp += offset
-        const prologue = jit.instgen("x49x89xec|x49x81xc4$1[0-4]|x4dx39xdc|x4dx31xf6|x4cx8dx3dx03x00x00x00|x41xffxe5|xebxe2|x48x81xc5$1[0-4]"){};
+        const prologue = jit.instgen("x49x89xec|x49x81xc4$1[0-4]|x4dx39xdc|x76x0f|x4dx31xf6|x4cx8dx3dx03x00x00x00|x41xffxe5|xebxe2|x48x81xc5$1[0-4]"){};
         _ = try prologue.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1) * 8});
     }
     pub fn fnepilogue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
