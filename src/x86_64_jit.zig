@@ -242,11 +242,11 @@ const X86_64jit = struct {
         _ = try lear12rip.write(out, .{});
         _ = try self.storeVirtualRegister(jit.Register{ .function = currentFn, .part = jit.RegisterPart.QW, .number = currentFn.registers_required + 1 }, 12, out);
 
-        const notneeded = ((currentFn.max_call_arg_registers + currentFn.max_call_return_registers) - (callFn.return_value_registers + callFn.arg_registers)) * 8;
-        const subrbp = jit.instgen("x48x81xc5$1[0-4]"){};
+        const notneeded = ((currentFn.max_call_arg_registers + currentFn.max_call_return_registers) - (callFn.return_value_registers)) * 8;
+        const subrbp = jit.instgen("x48x81xed$1[0-4]"){};
         _ = try subrbp.write(out, .{notneeded});
 
-        const addrbp = jit.instgen("x48x81xed$1[0-4]"){};
+        const addrbp = jit.instgen("x48x81xc5$1[0-4]"){};
         const jmpr12 = jit.instgen("x41xffxe4"){};
         const movabsq = jit.instgen("(0100100@1[3-4])(10111|@1[0-3])$2[0-8]"){};
         const offset = out.items.len;
