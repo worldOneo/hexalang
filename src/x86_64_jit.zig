@@ -292,11 +292,11 @@ const X86_64jit = struct {
         // enter:               ;   }
         // add rbp, 1234123     ;   rbp += offset
         const prologue = jit.instgen("x49x89xec|x49x81xc4$1[0-4]|x4dx39xdc|x76x0f|x4dx31xf6|x4cx8dx3dx03x00x00x00|x41xffxe5|xebxe2|x48x81xc5$1[0-4]"){};
-        _ = try prologue.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1) * 8});
+        _ = try prologue.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1 - data.arg_registers) * 8});
     }
     pub fn fnepilogue(_: *X86_64jit, data: jit.FnData, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
         const subrbp = jit.instgen("x48x81xed$1[0-4]"){};
-        _ = try subrbp.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1) * 8});
+        _ = try subrbp.write(out, .{(data.registers_required + data.max_call_arg_registers + data.max_call_return_registers + 1 - data.arg_registers) * 8});
     }
 
     pub fn invalidateLoadedReg(self: *X86_64jit, currentfn: jit.FnData, reg: u64, out: *std.ArrayList(u8)) std.mem.Allocator.Error!void {
