@@ -8,12 +8,15 @@ pub enum TokenValue {
     InlineComment(Rc<String>),
     BlockComment(Rc<String>),
     BraceOpen,
-    BaceClose,
+    BraceClose,
     ParenOpen,
     ParenClose,
     GT,
     LT,
     EQ,
+    GTEQ,
+    LTEQ,
+    EQEQ,
     SquareOpen,
     SquareClose,
     Protocol,
@@ -34,6 +37,8 @@ pub enum TokenValue {
     Dot,
     Colon,
     Not,
+    ShiftL,
+    ShiftR,
 }
 
 #[derive(Clone, Debug)]
@@ -155,17 +160,45 @@ fn any_of<'a, const N: usize>(
 pub fn tokenize(input: String) -> Vec<Token> {
     let out = vec![];
     let chars = input.chars().peekable();
-    dbg!(any_of(
-        SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
-        [
-            &|r| parse_exact(r, "fn", TokenValue::Fn),
-            &|r| parse_exact(r, "process", TokenValue::Process),
-            &|r| parse_exact(r, "protocol", TokenValue::Protocol),
-            &|r| parse_exact(r, "if", TokenValue::If),
-            &|r| parse_exact(r, "for", TokenValue::For),
-            &|r| parse_exact(r, "val", TokenValue::Val),
-            &|r| parse_exact(r, "var", TokenValue::Var),
-        ],
-    ).1);
+    dbg!(
+        any_of(
+            SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
+            [
+                &|r| parse_exact(r, "fn", TokenValue::Fn),
+                &|r| parse_exact(r, "process", TokenValue::Process),
+                &|r| parse_exact(r, "protocol", TokenValue::Protocol),
+                &|r| parse_exact(r, "if", TokenValue::If),
+                &|r| parse_exact(r, "for", TokenValue::For),
+                &|r| parse_exact(r, "val", TokenValue::Val),
+                &|r| parse_exact(r, "var", TokenValue::Var),
+                &|r| parse_exact(r, "{", TokenValue::BraceOpen),
+                &|r| parse_exact(r, "}", TokenValue::BraceClose),
+                &|r| parse_exact(r, "[", TokenValue::SquareOpen),
+                &|r| parse_exact(r, "]", TokenValue::SquareClose),
+                &|r| parse_exact(r, "(", TokenValue::ParenOpen),
+                &|r| parse_exact(r, ")", TokenValue::ParenClose),
+                &|r| parse_exact(r, "<=", TokenValue::LTEQ),
+                &|r| parse_exact(r, "<<", TokenValue::ShiftL),
+                &|r| parse_exact(r, "<", TokenValue::LT),
+                &|r| parse_exact(r, ">=", TokenValue::GTEQ),
+                &|r| parse_exact(r, ">>", TokenValue::ShiftR),
+                &|r| parse_exact(r, ">", TokenValue::GT),
+                &|r| parse_exact(r, "==", TokenValue::EQEQ),
+                &|r| parse_exact(r, "=", TokenValue::EQ),
+                &|r| parse_exact(r, "|>", TokenValue::Pipe),
+                &|r| parse_exact(r, "%", TokenValue::Mod),
+                &|r| parse_exact(r, "*", TokenValue::Mul),
+                &|r| parse_exact(r, "/", TokenValue::Div),
+                &|r| parse_exact(r, "+", TokenValue::Plus),
+                &|r| parse_exact(r, "-", TokenValue::Minus),
+                &|r| parse_exact(r, "^", TokenValue::Hat),
+                &|r| parse_exact(r, "&", TokenValue::Ampersand),
+                &|r| parse_exact(r, ".", TokenValue::Dot),
+                &|r| parse_exact(r, ":", TokenValue::Colon),
+                &|r| parse_exact(r, "!", TokenValue::Not),
+            ],
+        )
+        .1
+    );
     out
 }
