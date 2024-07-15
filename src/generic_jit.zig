@@ -32,7 +32,7 @@ pub fn instgen(comptime sstr: []const u8) type {
         while (argidx < str.len) {
             if (str[argidx] == '@' or str[argidx] == '$') {
                 argidx += 1;
-                var arg = readNum(str, &argidx);
+                const arg = readNum(str, &argidx);
                 count = @max(arg, count);
             } else {
                 argidx += 1;
@@ -141,7 +141,7 @@ pub fn instgen(comptime sstr: []const u8) type {
                 prev: Prev = Prev{},
                 fn write(self: *const Self, c: ContinueWrite, out: *std.ArrayList(u8), args: [count]u64) !ContinueWrite {
                     var old = try self.prev.write(c, out, args);
-                    var arg: *const [8]u8 = @ptrCast(&args[ArgNum]);
+                    const arg: *const [8]u8 = @ptrCast(&args[ArgNum]);
                     for (Start..Stop) |idx| {
                         old = try old.pushByte(arg[idx], out);
                     }
@@ -216,24 +216,24 @@ pub fn instgen(comptime sstr: []const u8) type {
                 if (str[idx] != '@' and !(bropen == 0 and str[idx] == '$') and str[idx] != '{') {
                     @compileError("invalid instgen expression: '" ++ str ++ "' invalid char '" ++ .{str[idx]} ++ "' expected @" ++ if (bropen == '1') ",0,1,x, or $" else ",$, or x");
                 }
-                var is_little_endian = str[idx] == '$';
-                var conditional = str[idx] == '{';
+                const is_little_endian = str[idx] == '$';
+                const conditional = str[idx] == '{';
 
                 idx += 1;
                 if (idx >= str.len or str[idx] < '1' or str[idx] > '9') {
                     @compileError("invalid instgen expression: '" ++ str ++ "' expected none null as parameter after '" ++ .{str[idx - 1]} ++ "'");
                 }
-                var paramnum = readNum(str, &idx);
+                const paramnum = readNum(str, &idx);
                 if (idx >= str.len or str[idx] != '[') {
                     @compileError("invalid instgen expression: '" ++ str ++ "' expected '[' after parameter number");
                 }
                 idx += 1;
-                var start = readNum(str, &idx);
+                const start = readNum(str, &idx);
                 if (idx >= str.len or str[idx] != '-') {
                     @compileError("invalid instgen expression: '" ++ str ++ "' expected '-' after start index");
                 }
                 idx += 1;
-                var end = readNum(str, &idx);
+                const end = readNum(str, &idx);
                 if (idx >= str.len or str[idx] != ']') {
                     @compileError("invalid instgen expression: '" ++ str ++ "' expected ']' after end index");
                 }
@@ -548,7 +548,7 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
                 return .{ .claimed = idx, .loaded = true, .mustStore = null };
             }
             if (self.freeregidx > 0) {
-                var idx = self.freeregs[self.freeregidx - 1];
+                const idx = self.freeregs[self.freeregidx - 1];
                 self.freeregidx -= 1;
                 self.prependRegister(&self.usedregs[idx]);
                 self.usedregs[idx].part = part;
@@ -557,8 +557,8 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
             }
             if (self.tail) |*tail| {
                 self.tail = tail.*.prev;
-                var oldreg = tail.*.vreg;
-                var oldpart = tail.*.part;
+                const oldreg = tail.*.vreg;
+                const oldpart = tail.*.part;
                 tail.*.vreg = vreg;
                 tail.*.part = part;
                 return .{ .claimed = tail.*.idx, .mustStore = .{ .vreg = oldreg, .part = oldpart } };
@@ -590,7 +590,7 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
         }
 
         pub fn returnRegister(self: *Self, idx: u64) struct { vreg: u64, part: RegisterPart } {
-            var reg: *ManagedRegister = &self.usedregs[idx];
+            const reg: *ManagedRegister = &self.usedregs[idx];
             self.unlinkRegister(reg);
             self.freeregs[self.freeregidx - 1] = reg.idx;
             self.freeregidx -= 1;
@@ -601,7 +601,7 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
         }
 
         pub fn touchRegister(self: *Self, idx: u64) void {
-            var reg: *ManagedRegister = &self.usedregs[idx];
+            const reg: *ManagedRegister = &self.usedregs[idx];
             self.unlinkRegister(reg);
             self.prependRegister(reg);
         }
@@ -624,7 +624,7 @@ pub fn LRURegisterAllocator(comptime N: usize, comptime Registers: [N]u64) type 
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var alloc = gpa.allocator();
+    const alloc = gpa.allocator();
     var out = std.ArrayList(u8).init(alloc);
     var jit = try x86_64.create_x86_64_arch(alloc);
     const mainfn = FnData{

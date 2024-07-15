@@ -35,7 +35,7 @@ const X86_64jit = struct {
     registers: Registers = Registers.init(),
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*X86_64jit {
-        var ptr = try allocator.create(X86_64jit);
+        const ptr = try allocator.create(X86_64jit);
         ptr.* = X86_64jit{};
         return ptr;
     }
