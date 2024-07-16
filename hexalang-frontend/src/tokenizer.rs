@@ -6,7 +6,6 @@ pub enum TokenValue {
     String(Rc<String>),
     Number(Rc<String>),
     InlineComment(Rc<String>),
-    BlockComment(Rc<String>),
     BraceOpen,
     BraceClose,
     ParenOpen,
@@ -232,6 +231,38 @@ fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
     return (t, Some(prev.emit_token(ot, token_value)));
 }
 
+fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let mut t = ot.clone();
+    let mut prev = t.clone();
+    if let (nt, Some(n)) = t.next_char() {
+        if n == '/' {
+            t = nt;
+        } else {
+            return (ot, None);
+        }
+    }
+    if let (nt, Some(n)) = t.next_char() {
+        if n == '/' {
+            prev = t.clone();
+            t = nt;
+        } else {
+            return (ot, None);
+        }
+    }
+    let mut content = String::new();
+    while let (nt, Some(n)) = t.next_char() {
+        if n != '\n' {
+            prev = t.clone();
+            content.push(n);
+            t = nt;
+        } else {
+            break;
+        }
+    }
+    let token_value = TokenValue::InlineComment(Rc::new(content));
+    return (t, Some(prev.emit_token(ot, token_value)));
+}
+
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
 
 fn any_of<'a, const N: usize>(
@@ -255,6 +286,7 @@ pub fn tokenize(input: String) -> Vec<Token> {
     let first_token = any_of(
         SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
         [
+            &lex_inline_comment,
             &|r| lex_exact(r, "fn", TokenValue::Fn),
             &|r| lex_exact(r, "process", TokenValue::Process),
             &|r| lex_exact(r, "protocol", TokenValue::Protocol),
@@ -289,7 +321,7 @@ pub fn tokenize(input: String) -> Vec<Token> {
             &|r| lex_exact(r, "!", TokenValue::Not),
             &lex_identifier,
             &lex_string,
-            &lex_number
+            &lex_number,
         ],
     )
     .1;

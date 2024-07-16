@@ -8,4 +8,5 @@ fn main() {
     tokenizer::tokenize("bob1".into());
     tokenizer::tokenize("\"\\\"This is a test\"".into());
     tokenizer::tokenize("1234.5678".into());
+    tokenizer::tokenize("// this is a test comment".into());
 }
