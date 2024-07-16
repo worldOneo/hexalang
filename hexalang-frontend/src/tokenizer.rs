@@ -76,7 +76,7 @@ impl<'a> SourceReader<'a> {
         };
     }
 
-    pub fn nextChar(&self) -> (Self, Option<char>) {
+    pub fn next_char(&self) -> (Self, Option<char>) {
         if self.file_offset >= self.data.len() {
             return (self.clone(), None);
         }
@@ -118,26 +118,56 @@ impl<'a> SourceReader<'a> {
     }
 }
 
-fn parse_exact<'a>(
+fn lex_exact<'a>(
     ot: SourceReader<'a>,
     exact: &str,
     token: TokenValue,
 ) -> (SourceReader<'a>, Option<Token>) {
     let mut t = ot.clone();
-    let mut read = String::new();
-    while read.len() < exact.len() {
-        if let (nt, Some(c)) = t.nextChar() {
+    let mut prev = ot.clone();
+    let mut chariter = exact.chars();
+    while let Some(required) = chariter.next() {
+        if let (nt, Some(c)) = t.next_char() {
+            prev = t.clone();
             t = nt;
-            read.push(c);
+            if c != required {
+                return (ot, None);
+            }
+        }
+    }
+
+    return (t, Some(prev.emit_token(ot, token)));
+}
+
+const FIRST_ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+const ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
+
+fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let mut t = ot.clone();
+    let mut prev = t.clone();
+    let mut id = String::new();
+    if let (nt, Some(char)) = ot.next_char() {
+        if FIRST_ID_CHAR.contains(char) {
+            id.push(char);
+            t = nt;
+        } else {
+            return (ot, None);
+        }
+    } else {
+        return (ot, None);
+    }
+
+    while let (nt, Some(char)) = t.next_char() {
+        if ID_CHAR.contains(char) {
+            prev = t.clone();
+            id.push(char);
+            t = nt;
         } else {
             break;
         }
     }
-
-    if read.as_str() == exact {
-        return (t.nextChar().0, Some(t.emit_token(ot, token)));
-    }
-    return (t, None);
+    let token = prev.emit_token(ot, TokenValue::Identifier(Rc::new(id)));
+    return (t, Some(token));
 }
 
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
@@ -160,45 +190,45 @@ fn any_of<'a, const N: usize>(
 pub fn tokenize(input: String) -> Vec<Token> {
     let out = vec![];
     let chars = input.chars().peekable();
-    dbg!(
-        any_of(
-            SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
-            [
-                &|r| parse_exact(r, "fn", TokenValue::Fn),
-                &|r| parse_exact(r, "process", TokenValue::Process),
-                &|r| parse_exact(r, "protocol", TokenValue::Protocol),
-                &|r| parse_exact(r, "if", TokenValue::If),
-                &|r| parse_exact(r, "for", TokenValue::For),
-                &|r| parse_exact(r, "val", TokenValue::Val),
-                &|r| parse_exact(r, "var", TokenValue::Var),
-                &|r| parse_exact(r, "{", TokenValue::BraceOpen),
-                &|r| parse_exact(r, "}", TokenValue::BraceClose),
-                &|r| parse_exact(r, "[", TokenValue::SquareOpen),
-                &|r| parse_exact(r, "]", TokenValue::SquareClose),
-                &|r| parse_exact(r, "(", TokenValue::ParenOpen),
-                &|r| parse_exact(r, ")", TokenValue::ParenClose),
-                &|r| parse_exact(r, "<=", TokenValue::LTEQ),
-                &|r| parse_exact(r, "<<", TokenValue::ShiftL),
-                &|r| parse_exact(r, "<", TokenValue::LT),
-                &|r| parse_exact(r, ">=", TokenValue::GTEQ),
-                &|r| parse_exact(r, ">>", TokenValue::ShiftR),
-                &|r| parse_exact(r, ">", TokenValue::GT),
-                &|r| parse_exact(r, "==", TokenValue::EQEQ),
-                &|r| parse_exact(r, "=", TokenValue::EQ),
-                &|r| parse_exact(r, "|>", TokenValue::Pipe),
-                &|r| parse_exact(r, "%", TokenValue::Mod),
-                &|r| parse_exact(r, "*", TokenValue::Mul),
-                &|r| parse_exact(r, "/", TokenValue::Div),
-                &|r| parse_exact(r, "+", TokenValue::Plus),
-                &|r| parse_exact(r, "-", TokenValue::Minus),
-                &|r| parse_exact(r, "^", TokenValue::Hat),
-                &|r| parse_exact(r, "&", TokenValue::Ampersand),
-                &|r| parse_exact(r, ".", TokenValue::Dot),
-                &|r| parse_exact(r, ":", TokenValue::Colon),
-                &|r| parse_exact(r, "!", TokenValue::Not),
-            ],
-        )
-        .1
-    );
+    let first_token = any_of(
+        SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
+        [
+            &|r| lex_exact(r, "fn", TokenValue::Fn),
+            &|r| lex_exact(r, "process", TokenValue::Process),
+            &|r| lex_exact(r, "protocol", TokenValue::Protocol),
+            &|r| lex_exact(r, "if", TokenValue::If),
+            &|r| lex_exact(r, "for", TokenValue::For),
+            &|r| lex_exact(r, "val", TokenValue::Val),
+            &|r| lex_exact(r, "var", TokenValue::Var),
+            &|r| lex_exact(r, "{", TokenValue::BraceOpen),
+            &|r| lex_exact(r, "}", TokenValue::BraceClose),
+            &|r| lex_exact(r, "[", TokenValue::SquareOpen),
+            &|r| lex_exact(r, "]", TokenValue::SquareClose),
+            &|r| lex_exact(r, "(", TokenValue::ParenOpen),
+            &|r| lex_exact(r, ")", TokenValue::ParenClose),
+            &|r| lex_exact(r, "<=", TokenValue::LTEQ),
+            &|r| lex_exact(r, "<<", TokenValue::ShiftL),
+            &|r| lex_exact(r, "<", TokenValue::LT),
+            &|r| lex_exact(r, ">=", TokenValue::GTEQ),
+            &|r| lex_exact(r, ">>", TokenValue::ShiftR),
+            &|r| lex_exact(r, ">", TokenValue::GT),
+            &|r| lex_exact(r, "==", TokenValue::EQEQ),
+            &|r| lex_exact(r, "=", TokenValue::EQ),
+            &|r| lex_exact(r, "|>", TokenValue::Pipe),
+            &|r| lex_exact(r, "%", TokenValue::Mod),
+            &|r| lex_exact(r, "*", TokenValue::Mul),
+            &|r| lex_exact(r, "/", TokenValue::Div),
+            &|r| lex_exact(r, "+", TokenValue::Plus),
+            &|r| lex_exact(r, "-", TokenValue::Minus),
+            &|r| lex_exact(r, "^", TokenValue::Hat),
+            &|r| lex_exact(r, "&", TokenValue::Ampersand),
+            &|r| lex_exact(r, ".", TokenValue::Dot),
+            &|r| lex_exact(r, ":", TokenValue::Colon),
+            &|r| lex_exact(r, "!", TokenValue::Not),
+            &lex_identifier
+        ],
+    )
+    .1;
+    dbg!(first_token);
     out
 }

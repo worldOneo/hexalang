@@ -5,4 +5,6 @@ fn main() {
     tokenizer::tokenize("for".into());
     tokenizer::tokenize("fn".into());
     tokenizer::tokenize("process".into());
+    tokenizer::tokenize("bob1".into());
+    tokenizer::tokenize("1bob".into());
 }
