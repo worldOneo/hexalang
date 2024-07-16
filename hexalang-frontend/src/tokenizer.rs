@@ -204,6 +204,34 @@ fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
     return (t, Some(token));
 }
 
+const DIGITS: &str = "0123456789";
+const NUMBER_CHARS: &str = "0123456789boxabcdef._";
+
+fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let mut t = ot.clone();
+    let mut prev = t.clone();
+    let mut content = String::new();
+    if let (nt, Some(n)) = t.next_char() {
+        if DIGITS.contains(n) {
+            content.push(n);
+            t = nt;
+        } else {
+            return (ot, None);
+        }
+    }
+    while let (nt, Some(n)) = t.next_char() {
+        if NUMBER_CHARS.contains(n) {
+            prev = t.clone();
+            content.push(n);
+            t = nt;
+        } else {
+            break;
+        }
+    }
+    let token_value = TokenValue::Number(Rc::new(content));
+    return (t, Some(prev.emit_token(ot, token_value)));
+}
+
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
 
 fn any_of<'a, const N: usize>(
@@ -261,6 +289,7 @@ pub fn tokenize(input: String) -> Vec<Token> {
             &|r| lex_exact(r, "!", TokenValue::Not),
             &lex_identifier,
             &lex_string,
+            &lex_number
         ],
     )
     .1;
