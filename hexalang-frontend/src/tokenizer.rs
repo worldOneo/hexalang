@@ -170,6 +170,40 @@ fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>)
     return (t, Some(token));
 }
 
+fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let mut t = ot.clone();
+    let mut prev = t.clone();
+    if let (nt, Some(char)) = ot.next_char() {
+        if char == '"' {
+            t = nt;
+        } else {
+            return (ot, None);
+        }
+    } else {
+        return (ot, None);
+    }
+
+    let mut str_content = String::new();
+
+    while let (nt, Some(char)) = t.next_char() {
+        prev = t.clone();
+        t = nt;
+        if char == '"' {
+            break;
+        }
+        str_content.push(char);
+        if char == '\\' {
+            if let (nt, Some('"')) = t.next_char() {
+                prev = t.clone();
+                str_content.push('"');
+                t = nt;
+            }
+        }
+    }
+    let token = prev.emit_token(ot, TokenValue::String(Rc::new(str_content)));
+    return (t, Some(token));
+}
+
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
 
 fn any_of<'a, const N: usize>(
@@ -225,7 +259,8 @@ pub fn tokenize(input: String) -> Vec<Token> {
             &|r| lex_exact(r, ".", TokenValue::Dot),
             &|r| lex_exact(r, ":", TokenValue::Colon),
             &|r| lex_exact(r, "!", TokenValue::Not),
-            &lex_identifier
+            &lex_identifier,
+            &lex_string,
         ],
     )
     .1;
