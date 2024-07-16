@@ -38,6 +38,7 @@ pub enum TokenValue {
     Not,
     ShiftL,
     ShiftR,
+    Whitespace(char),
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +218,8 @@ fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
         } else {
             return (ot, None);
         }
+    } else {
+        return (ot, None);
     }
     while let (nt, Some(n)) = t.next_char() {
         if NUMBER_CHARS.contains(n) {
@@ -240,6 +243,8 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
         } else {
             return (ot, None);
         }
+    } else {
+        return (ot, None);
     }
     if let (nt, Some(n)) = t.next_char() {
         if n == '/' {
@@ -248,6 +253,8 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
         } else {
             return (ot, None);
         }
+    } else {
+        return (ot, None);
     }
     let mut content = String::new();
     while let (nt, Some(n)) = t.next_char() {
@@ -261,6 +268,24 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
     }
     let token_value = TokenValue::InlineComment(Rc::new(content));
     return (t, Some(prev.emit_token(ot, token_value)));
+}
+
+const WHITESPACE: &str = " \r\n\t";
+
+fn lex_whitespace<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let mut t = ot.clone();
+    let whitespace = if let (nt, Some(n)) = t.next_char() {
+        if WHITESPACE.contains(n) {
+            t = nt;
+            n
+        } else {
+            return (ot, None);
+        }
+    } else {
+        return (ot, None);
+    };
+    let token_value = TokenValue::Whitespace(whitespace);
+    return (t, Some(ot.emit_token(ot.clone(), token_value)));
 }
 
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
@@ -322,6 +347,7 @@ pub fn tokenize(input: String) -> Vec<Token> {
             &lex_identifier,
             &lex_string,
             &lex_number,
+            &lex_whitespace
         ],
     )
     .1;

@@ -9,4 +9,5 @@ fn main() {
     tokenizer::tokenize("\"\\\"This is a test\"".into());
     tokenizer::tokenize("1234.5678".into());
     tokenizer::tokenize("// this is a test comment".into());
+    tokenizer::tokenize(" ".into());
 }
