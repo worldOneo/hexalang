@@ -2,10 +2,10 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug)]
 pub enum TokenValue {
-    Identifier(Rc<String>),
-    String(Rc<String>),
-    Number(Rc<String>),
-    InlineComment(Rc<String>),
+    Identifier,
+    String,
+    Number,
+    InlineComment,
     BraceOpen,
     BraceClose,
     ParenOpen,
@@ -38,22 +38,22 @@ pub enum TokenValue {
     Not,
     ShiftL,
     ShiftR,
-    Whitespace(char),
+    Whitespace,
 }
-
-#[derive(Clone, Debug)]
-pub struct TokenLocation {
-    line: usize,
-    line_offset: usize,
-    file_offset: usize,
-}
-
 #[derive(Clone, Debug)]
 pub struct Token {
-    file: Rc<String>,
-    start: TokenLocation,
-    stop: TokenLocation,
+    start: u32,
     value: TokenValue,
+}
+
+impl Token {
+    pub fn value(&self) -> TokenValue {
+        return self.value.clone();
+    }
+
+    pub fn offset(&self) -> u32 {
+        return self.start;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -100,19 +100,9 @@ impl<'a> SourceReader<'a> {
         );
     }
 
-    fn to_location(&self) -> TokenLocation {
-        return TokenLocation {
-            line: self.line,
-            file_offset: self.file_offset,
-            line_offset: self.line_offset,
-        };
-    }
-
-    pub fn emit_token<'b>(&self, start: SourceReader<'b>, value: TokenValue) -> Token {
+    pub fn emit_token<'b>(&self, value: TokenValue) -> Token {
         return Token {
-            file: start.file.clone(),
-            start: start.to_location(),
-            stop: self.to_location(),
+            start: self.file_offset as u32,
             value,
         };
     }
@@ -124,31 +114,35 @@ fn lex_exact<'a>(
     token: TokenValue,
 ) -> (SourceReader<'a>, Option<Token>) {
     let mut t = ot.clone();
-    let mut prev = ot.clone();
     let mut chariter = exact.chars();
     while let Some(required) = chariter.next() {
         if let (nt, Some(c)) = t.next_char() {
-            prev = t.clone();
             t = nt;
             if c != required {
                 return (ot, None);
             }
+        } else {
+          return (ot, None);
         }
     }
 
-    return (t, Some(prev.emit_token(ot, token)));
+    return (t, Some(ot.emit_token(token)));
 }
 
 const FIRST_ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
 
-fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let mut t = ot.clone();
-    let mut prev = t.clone();
+fn lex_identifier_value<'a>(
+    ot: SourceReader<'a>,
+    return_real_value: bool,
+) -> (SourceReader<'a>, Option<String>) {
+    let mut t;
     let mut id = String::new();
     if let (nt, Some(char)) = ot.next_char() {
         if FIRST_ID_CHAR.contains(char) {
-            id.push(char);
+            if return_real_value {
+                id.push(char);
+            }
             t = nt;
         } else {
             return (ot, None);
@@ -159,20 +153,31 @@ fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>)
 
     while let (nt, Some(char)) = t.next_char() {
         if ID_CHAR.contains(char) {
-            prev = t.clone();
-            id.push(char);
+            if return_real_value {
+                id.push(char);
+            }
             t = nt;
         } else {
             break;
         }
     }
-    let token = prev.emit_token(ot, TokenValue::Identifier(Rc::new(id)));
-    return (t, Some(token));
+    return (t, Some(id));
 }
 
-fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let mut t = ot.clone();
-    let mut prev = t.clone();
+fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let (t, v) = lex_identifier_value(ot.clone(), false);
+    if let Some(_) = v {
+        let token = ot.emit_token(TokenValue::Identifier);
+        return (t, Some(token));
+    }
+    return (ot, None);
+}
+
+fn lex_string_value<'a>(
+    ot: SourceReader<'a>,
+    return_real_value: bool,
+) -> (SourceReader<'a>, Option<String>) {
+    let mut t;
     if let (nt, Some(char)) = ot.next_char() {
         if char == '"' {
             t = nt;
@@ -184,36 +189,52 @@ fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
     }
 
     let mut str_content = String::new();
+    let mut terminated = false;
 
     while let (nt, Some(char)) = t.next_char() {
-        prev = t.clone();
         t = nt;
         if char == '"' {
+            terminated = true;
             break;
         }
-        str_content.push(char);
+        if return_real_value {
+            str_content.push(char);
+        }
         if char == '\\' {
             if let (nt, Some('"')) = t.next_char() {
-                prev = t.clone();
                 str_content.push('"');
                 t = nt;
             }
         }
     }
-    let token = prev.emit_token(ot, TokenValue::String(Rc::new(str_content)));
-    return (t, Some(token));
+    if !terminated {
+        return (ot, None);
+    }
+    return (t, Some(str_content));
+}
+
+fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let (t, v) = lex_string_value(ot.clone(), false);
+    if let Some(_) = v {
+        return (t, Some(ot.emit_token(TokenValue::String)));
+    }
+    return (ot, None);
 }
 
 const DIGITS: &str = "0123456789";
 const NUMBER_CHARS: &str = "0123456789boxabcdef._";
 
-fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+fn lex_number_string_value<'a>(
+    ot: SourceReader<'a>,
+    return_real_value: bool,
+) -> (SourceReader<'a>, Option<String>) {
     let mut t = ot.clone();
-    let mut prev = t.clone();
     let mut content = String::new();
     if let (nt, Some(n)) = t.next_char() {
         if DIGITS.contains(n) {
-            content.push(n);
+            if return_real_value {
+                content.push(n);
+            }
             t = nt;
         } else {
             return (ot, None);
@@ -223,20 +244,31 @@ fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
     }
     while let (nt, Some(n)) = t.next_char() {
         if NUMBER_CHARS.contains(n) {
-            prev = t.clone();
-            content.push(n);
+            if return_real_value {
+                content.push(n);
+            }
             t = nt;
         } else {
             break;
         }
     }
-    let token_value = TokenValue::Number(Rc::new(content));
-    return (t, Some(prev.emit_token(ot, token_value)));
+    return (t, Some(content));
 }
 
-fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let (t, v) = lex_number_string_value(ot.clone(), false);
+    if let Some(_) = v {
+        let token_value = TokenValue::Number;
+        return (t, Some(ot.emit_token(token_value)));
+    }
+    return (ot, None);
+}
+
+fn lex_inline_comment_value<'a>(
+    ot: SourceReader<'a>,
+    return_real_value: bool,
+) -> (SourceReader<'a>, Option<String>) {
     let mut t = ot.clone();
-    let mut prev = t.clone();
     if let (nt, Some(n)) = t.next_char() {
         if n == '/' {
             t = nt;
@@ -248,7 +280,6 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
     }
     if let (nt, Some(n)) = t.next_char() {
         if n == '/' {
-            prev = t.clone();
             t = nt;
         } else {
             return (ot, None);
@@ -259,33 +290,67 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
     let mut content = String::new();
     while let (nt, Some(n)) = t.next_char() {
         if n != '\n' {
-            prev = t.clone();
-            content.push(n);
+            if return_real_value {
+                content.push(n);
+            }
             t = nt;
         } else {
             break;
         }
     }
-    let token_value = TokenValue::InlineComment(Rc::new(content));
-    return (t, Some(prev.emit_token(ot, token_value)));
+    return (t, Some(content));
+}
+
+fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let (t, v) = lex_inline_comment_value(ot.clone(), false);
+    if let Some(_) = v {
+        let token_value = TokenValue::InlineComment;
+        return (t, Some(ot.emit_token(token_value)));
+    }
+    return (ot, None);
 }
 
 const WHITESPACE: &str = " \r\n\t";
 
-fn lex_whitespace<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+fn lex_whitespace_value<'a>(
+    ot: SourceReader<'a>,
+    return_real_value: bool,
+) -> (SourceReader<'a>, Option<String>) {
     let mut t = ot.clone();
-    let whitespace = if let (nt, Some(n)) = t.next_char() {
+    let mut content: String = if let (nt, Some(n)) = t.next_char() {
         if WHITESPACE.contains(n) {
             t = nt;
-            n
+            if return_real_value {
+                [n].iter().collect()
+            } else {
+                String::new()
+            }
         } else {
             return (ot, None);
         }
     } else {
         return (ot, None);
     };
-    let token_value = TokenValue::Whitespace(whitespace);
-    return (t, Some(ot.emit_token(ot.clone(), token_value)));
+    while let (nt, Some(n)) = t.next_char() {
+        if WHITESPACE.contains(n) {
+            t = nt;
+            if return_real_value {
+                content.push(n)
+            }
+        } else {
+            break;
+        }
+    }
+    return (t, Some(content));
+}
+
+fn lex_whitespace<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    let (t, v) = lex_whitespace_value(ot.clone(), false);
+    if let Some(_) = v {
+        let token_value = TokenValue::Whitespace;
+        return (t, Some(ot.emit_token(token_value)));
+    }
+    return (ot, None);
 }
 
 type LexFn<'a> = dyn Fn(SourceReader<'a>) -> (SourceReader<'a>, Option<Token>);
@@ -305,52 +370,63 @@ fn any_of<'a, const N: usize>(
     return (reader, None);
 }
 
+struct TokenIterator<'a> {
+    source: SourceReader<'a>,
+}
+
+impl<'a> Iterator for TokenIterator<'a> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Token> {
+        let (source, t) = any_of(
+            self.source.clone(),
+            [
+                &lex_inline_comment,
+                &|r| lex_exact(r, "fn", TokenValue::Fn),
+                &|r| lex_exact(r, "process", TokenValue::Process),
+                &|r| lex_exact(r, "protocol", TokenValue::Protocol),
+                &|r| lex_exact(r, "if", TokenValue::If),
+                &|r| lex_exact(r, "for", TokenValue::For),
+                &|r| lex_exact(r, "val", TokenValue::Val),
+                &|r| lex_exact(r, "var", TokenValue::Var),
+                &|r| lex_exact(r, "{", TokenValue::BraceOpen),
+                &|r| lex_exact(r, "}", TokenValue::BraceClose),
+                &|r| lex_exact(r, "[", TokenValue::SquareOpen),
+                &|r| lex_exact(r, "]", TokenValue::SquareClose),
+                &|r| lex_exact(r, "(", TokenValue::ParenOpen),
+                &|r| lex_exact(r, ")", TokenValue::ParenClose),
+                &|r| lex_exact(r, "<=", TokenValue::LTEQ),
+                &|r| lex_exact(r, "<<", TokenValue::ShiftL),
+                &|r| lex_exact(r, "<", TokenValue::LT),
+                &|r| lex_exact(r, ">=", TokenValue::GTEQ),
+                &|r| lex_exact(r, ">>", TokenValue::ShiftR),
+                &|r| lex_exact(r, ">", TokenValue::GT),
+                &|r| lex_exact(r, "==", TokenValue::EQEQ),
+                &|r| lex_exact(r, "=", TokenValue::EQ),
+                &|r| lex_exact(r, "|>", TokenValue::Pipe),
+                &|r| lex_exact(r, "%", TokenValue::Mod),
+                &|r| lex_exact(r, "*", TokenValue::Mul),
+                &|r| lex_exact(r, "/", TokenValue::Div),
+                &|r| lex_exact(r, "+", TokenValue::Plus),
+                &|r| lex_exact(r, "-", TokenValue::Minus),
+                &|r| lex_exact(r, "^", TokenValue::Hat),
+                &|r| lex_exact(r, "&", TokenValue::Ampersand),
+                &|r| lex_exact(r, ".", TokenValue::Dot),
+                &|r| lex_exact(r, ":", TokenValue::Colon),
+                &|r| lex_exact(r, "!", TokenValue::Not),
+                &lex_identifier,
+                &lex_string,
+                &lex_number,
+                &lex_whitespace,
+            ],
+        );
+        self.source = source;
+        return t;
+    }
+}
+
 pub fn tokenize(input: String) -> Vec<Token> {
-    let out = vec![];
-    let chars = input.chars().peekable();
-    let first_token = any_of(
-        SourceReader::new(&chars.collect(), Rc::new(String::from("shell"))),
-        [
-            &lex_inline_comment,
-            &|r| lex_exact(r, "fn", TokenValue::Fn),
-            &|r| lex_exact(r, "process", TokenValue::Process),
-            &|r| lex_exact(r, "protocol", TokenValue::Protocol),
-            &|r| lex_exact(r, "if", TokenValue::If),
-            &|r| lex_exact(r, "for", TokenValue::For),
-            &|r| lex_exact(r, "val", TokenValue::Val),
-            &|r| lex_exact(r, "var", TokenValue::Var),
-            &|r| lex_exact(r, "{", TokenValue::BraceOpen),
-            &|r| lex_exact(r, "}", TokenValue::BraceClose),
-            &|r| lex_exact(r, "[", TokenValue::SquareOpen),
-            &|r| lex_exact(r, "]", TokenValue::SquareClose),
-            &|r| lex_exact(r, "(", TokenValue::ParenOpen),
-            &|r| lex_exact(r, ")", TokenValue::ParenClose),
-            &|r| lex_exact(r, "<=", TokenValue::LTEQ),
-            &|r| lex_exact(r, "<<", TokenValue::ShiftL),
-            &|r| lex_exact(r, "<", TokenValue::LT),
-            &|r| lex_exact(r, ">=", TokenValue::GTEQ),
-            &|r| lex_exact(r, ">>", TokenValue::ShiftR),
-            &|r| lex_exact(r, ">", TokenValue::GT),
-            &|r| lex_exact(r, "==", TokenValue::EQEQ),
-            &|r| lex_exact(r, "=", TokenValue::EQ),
-            &|r| lex_exact(r, "|>", TokenValue::Pipe),
-            &|r| lex_exact(r, "%", TokenValue::Mod),
-            &|r| lex_exact(r, "*", TokenValue::Mul),
-            &|r| lex_exact(r, "/", TokenValue::Div),
-            &|r| lex_exact(r, "+", TokenValue::Plus),
-            &|r| lex_exact(r, "-", TokenValue::Minus),
-            &|r| lex_exact(r, "^", TokenValue::Hat),
-            &|r| lex_exact(r, "&", TokenValue::Ampersand),
-            &|r| lex_exact(r, ".", TokenValue::Dot),
-            &|r| lex_exact(r, ":", TokenValue::Colon),
-            &|r| lex_exact(r, "!", TokenValue::Not),
-            &lex_identifier,
-            &lex_string,
-            &lex_number,
-            &lex_whitespace
-        ],
-    )
-    .1;
-    dbg!(first_token);
-    out
+    let chars = input.chars().collect();
+    let source = SourceReader::new(&chars, Rc::new(String::from("shell")));
+    return TokenIterator { source }.collect();
 }
