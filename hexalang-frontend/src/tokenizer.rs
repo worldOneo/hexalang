@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::VecDeque, rc::Rc};
 
 #[derive(Clone, Debug)]
 pub enum TokenValue {
@@ -39,6 +39,10 @@ pub enum TokenValue {
     ShiftL,
     ShiftR,
     Whitespace,
+    // Phantom
+    PhantomBraceClose,
+    PhantomSquareClose,
+    PhantomParenClose,
 }
 #[derive(Clone, Debug)]
 pub struct Token {
@@ -54,6 +58,10 @@ impl Token {
     pub fn offset(&self) -> u32 {
         return self.start;
     }
+}
+
+pub struct SourceFile {
+    file: Rc<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +111,12 @@ impl<'a> SourceReader<'a> {
         return Self {
             offset: offset as usize,
             data: self.data,
+            file: self.file.clone(),
+        };
+    }
+
+    pub fn source_file(&self) -> SourceFile {
+        return SourceFile {
             file: self.file.clone(),
         };
     }
@@ -326,14 +340,26 @@ fn any_of<'a, const N: usize>(
     return (reader, None);
 }
 
+#[derive(PartialEq)]
+enum OpenClose {
+    Brace,
+    Paren,
+    Square,
+}
+
 struct TokenIterator<'a> {
     source: SourceReader<'a>,
+    open_close_stack: Vec<OpenClose>,
+    to_emit: VecDeque<Token>,
 }
 
 impl<'a> Iterator for TokenIterator<'a> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Token> {
+        if let Some(pop) = self.to_emit.pop_front() {
+            return Some(pop);
+        }
         let (source, t) = any_of(
             self.source.clone(),
             [
@@ -377,6 +403,64 @@ impl<'a> Iterator for TokenIterator<'a> {
             ],
         );
         self.source = source;
+
+        // emitting phantom closes to maybe maybe correctly patch the AST
+        {
+            let closing_value = |v: OpenClose| match v {
+                OpenClose::Brace => TokenValue::PhantomBraceClose,
+                OpenClose::Square => TokenValue::PhantomSquareClose,
+                OpenClose::Paren => TokenValue::PhantomParenClose,
+            };
+            if let Some(t) = t.clone() {
+                match t.value() {
+                    TokenValue::BraceClose => {
+                        while let Some(close) = self.open_close_stack.pop() {
+                            if close == OpenClose::Brace {
+                                break;
+                            }
+                            self.to_emit.push_back(Token {
+                                start: t.offset(),
+                                value: closing_value(close),
+                            });
+                        }
+                    }
+                    TokenValue::ParenClose => {
+                        while let Some(close) = self.open_close_stack.pop() {
+                            if close == OpenClose::Paren {
+                                break;
+                            }
+                            self.to_emit.push_back(Token {
+                                start: t.offset(),
+                                value: closing_value(close),
+                            });
+                        }
+                    }
+                    TokenValue::SquareClose => {
+                        while let Some(close) = self.open_close_stack.pop() {
+                            if close == OpenClose::Square {
+                                break;
+                            }
+                            self.to_emit.push_back(Token {
+                                start: t.offset(),
+                                value: closing_value(close),
+                            });
+                        }
+                    }
+                    TokenValue::SquareOpen => self.open_close_stack.push(OpenClose::Square),
+                    TokenValue::BraceOpen => self.open_close_stack.push(OpenClose::Brace),
+                    TokenValue::ParenOpen => self.open_close_stack.push(OpenClose::Paren),
+                    _ => {}
+                }
+            }
+
+            if let Some(e) = self.to_emit.pop_front() {
+                if let Some(t) = t.clone() {
+                    self.to_emit.push_back(t);
+                }
+                return Some(e);
+            }
+        }
+
         return t;
     }
 }
@@ -384,5 +468,10 @@ impl<'a> Iterator for TokenIterator<'a> {
 pub fn tokenize(input: String) -> Vec<Token> {
     let chars = input.chars().collect();
     let source = SourceReader::new(&chars, Rc::new(String::from("shell")));
-    return TokenIterator { source }.collect();
+    return TokenIterator {
+        source,
+        to_emit: VecDeque::new(),
+        open_close_stack: vec![],
+    }
+    .collect();
 }
