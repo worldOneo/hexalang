@@ -59,9 +59,7 @@ impl Token {
 #[derive(Clone, Debug)]
 struct SourceReader<'a> {
     file: Rc<String>,
-    file_offset: usize,
-    line_offset: usize,
-    line: usize,
+    offset: usize,
     data: &'a Vec<char>,
 }
 
@@ -69,30 +67,20 @@ impl<'a> SourceReader<'a> {
     pub fn new(data: &'a Vec<char>, file_name: Rc<String>) -> Self {
         return Self {
             file: file_name,
-            file_offset: 0,
-            line_offset: 0,
-            line: 0,
+            offset: 0,
             data: data,
         };
     }
 
     pub fn next_char(&self) -> (Self, Option<char>) {
-        if self.file_offset >= self.data.len() {
+        if self.offset >= self.data.len() {
             return (self.clone(), None);
         }
-        let file_offset = self.file_offset + 1;
-        let mut line_offset = self.line_offset + 1;
-        let mut line = self.line;
+        let file_offset = self.offset + 1;
         let char = self.data[file_offset - 1];
-        if char == '\n' {
-            line_offset = 0;
-            line += 1;
-        }
         return (
             Self {
-                file_offset: file_offset,
-                line: line,
-                line_offset: line_offset,
+                offset: file_offset,
                 file: self.file.clone(),
                 data: self.data,
             },
@@ -102,8 +90,20 @@ impl<'a> SourceReader<'a> {
 
     pub fn emit_token<'b>(&self, value: TokenValue) -> Token {
         return Token {
-            start: self.file_offset as u32,
+            start: self.offset as u32,
             value,
+        };
+    }
+
+    pub fn sequence(&self, end_exclusive: &Self) -> &'a [char] {
+        return &self.data[self.offset..end_exclusive.offset];
+    }
+
+    pub fn set_offset(&self, offset: u32) -> Self {
+        return Self {
+            offset: offset as usize,
+            data: self.data,
+            file: self.file.clone(),
         };
     }
 }
@@ -122,7 +122,7 @@ fn lex_exact<'a>(
                 return (ot, None);
             }
         } else {
-          return (ot, None);
+            return (ot, None);
         }
     }
 
@@ -132,17 +132,10 @@ fn lex_exact<'a>(
 const FIRST_ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
 
-fn lex_identifier_value<'a>(
-    ot: SourceReader<'a>,
-    return_real_value: bool,
-) -> (SourceReader<'a>, Option<String>) {
+fn lex_identifier_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t;
-    let mut id = String::new();
     if let (nt, Some(char)) = ot.next_char() {
         if FIRST_ID_CHAR.contains(char) {
-            if return_real_value {
-                id.push(char);
-            }
             t = nt;
         } else {
             return (ot, None);
@@ -153,19 +146,16 @@ fn lex_identifier_value<'a>(
 
     while let (nt, Some(char)) = t.next_char() {
         if ID_CHAR.contains(char) {
-            if return_real_value {
-                id.push(char);
-            }
             t = nt;
         } else {
             break;
         }
     }
-    return (t, Some(id));
+    return (t.clone(), Some(ot.sequence(&t)));
 }
 
 fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let (t, v) = lex_identifier_value(ot.clone(), false);
+    let (t, v) = lex_identifier_value(ot.clone());
     if let Some(_) = v {
         let token = ot.emit_token(TokenValue::Identifier);
         return (t, Some(token));
@@ -173,10 +163,7 @@ fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>)
     return (ot, None);
 }
 
-fn lex_string_value<'a>(
-    ot: SourceReader<'a>,
-    return_real_value: bool,
-) -> (SourceReader<'a>, Option<String>) {
+fn lex_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t;
     if let (nt, Some(char)) = ot.next_char() {
         if char == '"' {
@@ -188,7 +175,7 @@ fn lex_string_value<'a>(
         return (ot, None);
     }
 
-    let mut str_content = String::new();
+    let start = t.clone();
     let mut terminated = false;
 
     while let (nt, Some(char)) = t.next_char() {
@@ -197,12 +184,8 @@ fn lex_string_value<'a>(
             terminated = true;
             break;
         }
-        if return_real_value {
-            str_content.push(char);
-        }
         if char == '\\' {
             if let (nt, Some('"')) = t.next_char() {
-                str_content.push('"');
                 t = nt;
             }
         }
@@ -210,11 +193,11 @@ fn lex_string_value<'a>(
     if !terminated {
         return (ot, None);
     }
-    return (t, Some(str_content));
+    return (t.clone(), Some(start.sequence(&t)));
 }
 
 fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let (t, v) = lex_string_value(ot.clone(), false);
+    let (t, v) = lex_string_value(ot.clone());
     if let Some(_) = v {
         return (t, Some(ot.emit_token(TokenValue::String)));
     }
@@ -224,17 +207,10 @@ fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
 const DIGITS: &str = "0123456789";
 const NUMBER_CHARS: &str = "0123456789boxabcdef._";
 
-fn lex_number_string_value<'a>(
-    ot: SourceReader<'a>,
-    return_real_value: bool,
-) -> (SourceReader<'a>, Option<String>) {
+fn lex_number_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
-    let mut content = String::new();
     if let (nt, Some(n)) = t.next_char() {
         if DIGITS.contains(n) {
-            if return_real_value {
-                content.push(n);
-            }
             t = nt;
         } else {
             return (ot, None);
@@ -244,19 +220,16 @@ fn lex_number_string_value<'a>(
     }
     while let (nt, Some(n)) = t.next_char() {
         if NUMBER_CHARS.contains(n) {
-            if return_real_value {
-                content.push(n);
-            }
             t = nt;
         } else {
             break;
         }
     }
-    return (t, Some(content));
+    return (t.clone(), Some(ot.sequence(&t)));
 }
 
 fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let (t, v) = lex_number_string_value(ot.clone(), false);
+    let (t, v) = lex_number_string_value(ot.clone());
     if let Some(_) = v {
         let token_value = TokenValue::Number;
         return (t, Some(ot.emit_token(token_value)));
@@ -264,10 +237,7 @@ fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
     return (ot, None);
 }
 
-fn lex_inline_comment_value<'a>(
-    ot: SourceReader<'a>,
-    return_real_value: bool,
-) -> (SourceReader<'a>, Option<String>) {
+fn lex_inline_comment_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
     if let (nt, Some(n)) = t.next_char() {
         if n == '/' {
@@ -287,22 +257,19 @@ fn lex_inline_comment_value<'a>(
     } else {
         return (ot, None);
     }
-    let mut content = String::new();
+    let start = t.clone();
     while let (nt, Some(n)) = t.next_char() {
         if n != '\n' {
-            if return_real_value {
-                content.push(n);
-            }
             t = nt;
         } else {
             break;
         }
     }
-    return (t, Some(content));
+    return (t.clone(), Some(start.sequence(&t)));
 }
 
 fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let (t, v) = lex_inline_comment_value(ot.clone(), false);
+    let (t, v) = lex_inline_comment_value(ot.clone());
     if let Some(_) = v {
         let token_value = TokenValue::InlineComment;
         return (t, Some(ot.emit_token(token_value)));
@@ -312,40 +279,29 @@ fn lex_inline_comment<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Tok
 
 const WHITESPACE: &str = " \r\n\t";
 
-fn lex_whitespace_value<'a>(
-    ot: SourceReader<'a>,
-    return_real_value: bool,
-) -> (SourceReader<'a>, Option<String>) {
+fn lex_whitespace_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
-    let mut content: String = if let (nt, Some(n)) = t.next_char() {
+    if let (nt, Some(n)) = t.next_char() {
         if WHITESPACE.contains(n) {
             t = nt;
-            if return_real_value {
-                [n].iter().collect()
-            } else {
-                String::new()
-            }
         } else {
             return (ot, None);
         }
     } else {
         return (ot, None);
-    };
+    }
     while let (nt, Some(n)) = t.next_char() {
         if WHITESPACE.contains(n) {
             t = nt;
-            if return_real_value {
-                content.push(n)
-            }
         } else {
             break;
         }
     }
-    return (t, Some(content));
+    return (t.clone(), Some(ot.sequence(&t)));
 }
 
 fn lex_whitespace<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
-    let (t, v) = lex_whitespace_value(ot.clone(), false);
+    let (t, v) = lex_whitespace_value(ot.clone());
     if let Some(_) = v {
         let token_value = TokenValue::Whitespace;
         return (t, Some(ot.emit_token(token_value)));
