@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, rc::Rc};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TokenValue {
     Identifier,
     String,
@@ -65,14 +65,14 @@ pub struct SourceFile {
 }
 
 #[derive(Clone, Debug)]
-struct SourceReader<'a> {
+pub struct SourceReader<'a> {
     file: Rc<String>,
     offset: usize,
     data: &'a Vec<char>,
 }
 
 impl<'a> SourceReader<'a> {
-    pub fn new(data: &'a Vec<char>, file_name: Rc<String>) -> Self {
+    fn new(data: &'a Vec<char>, file_name: Rc<String>) -> Self {
         return Self {
             file: file_name,
             offset: 0,
@@ -80,7 +80,7 @@ impl<'a> SourceReader<'a> {
         };
     }
 
-    pub fn next_char(&self) -> (Self, Option<char>) {
+    fn next(&self) -> (Self, Option<char>) {
         if self.offset >= self.data.len() {
             return (self.clone(), None);
         }
@@ -96,7 +96,7 @@ impl<'a> SourceReader<'a> {
         );
     }
 
-    pub fn emit_token<'b>(&self, value: TokenValue) -> Token {
+    fn emit_token<'b>(&self, value: TokenValue) -> Token {
         return Token {
             start: self.offset as u32,
             value,
@@ -115,7 +115,7 @@ impl<'a> SourceReader<'a> {
         };
     }
 
-    pub fn source_file(&self) -> SourceFile {
+    fn source_file(&self) -> SourceFile {
         return SourceFile {
             file: self.file.clone(),
         };
@@ -130,7 +130,7 @@ fn lex_exact<'a>(
     let mut t = ot.clone();
     let mut chariter = exact.chars();
     while let Some(required) = chariter.next() {
-        if let (nt, Some(c)) = t.next_char() {
+        if let (nt, Some(c)) = t.next() {
             t = nt;
             if c != required {
                 return (ot, None);
@@ -146,9 +146,9 @@ fn lex_exact<'a>(
 const FIRST_ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
 
-fn lex_identifier_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
+pub fn lex_identifier_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t;
-    if let (nt, Some(char)) = ot.next_char() {
+    if let (nt, Some(char)) = ot.next() {
         if FIRST_ID_CHAR.contains(char) {
             t = nt;
         } else {
@@ -158,7 +158,7 @@ fn lex_identifier_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&
         return (ot, None);
     }
 
-    while let (nt, Some(char)) = t.next_char() {
+    while let (nt, Some(char)) = t.next() {
         if ID_CHAR.contains(char) {
             t = nt;
         } else {
@@ -177,9 +177,9 @@ fn lex_identifier<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>)
     return (ot, None);
 }
 
-fn lex_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
+pub fn lex_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t;
-    if let (nt, Some(char)) = ot.next_char() {
+    if let (nt, Some(char)) = ot.next() {
         if char == '"' {
             t = nt;
         } else {
@@ -192,14 +192,14 @@ fn lex_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [
     let start = t.clone();
     let mut terminated = false;
 
-    while let (nt, Some(char)) = t.next_char() {
+    while let (nt, Some(char)) = t.next() {
         t = nt;
         if char == '"' {
             terminated = true;
             break;
         }
         if char == '\\' {
-            if let (nt, Some('"')) = t.next_char() {
+            if let (nt, Some('"')) = t.next() {
                 t = nt;
             }
         }
@@ -221,9 +221,9 @@ fn lex_string<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
 const DIGITS: &str = "0123456789";
 const NUMBER_CHARS: &str = "0123456789boxabcdef._";
 
-fn lex_number_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
+pub fn lex_number_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
-    if let (nt, Some(n)) = t.next_char() {
+    if let (nt, Some(n)) = t.next() {
         if DIGITS.contains(n) {
             t = nt;
         } else {
@@ -232,7 +232,7 @@ fn lex_number_string_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Optio
     } else {
         return (ot, None);
     }
-    while let (nt, Some(n)) = t.next_char() {
+    while let (nt, Some(n)) = t.next() {
         if NUMBER_CHARS.contains(n) {
             t = nt;
         } else {
@@ -253,7 +253,7 @@ fn lex_number<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
 
 fn lex_inline_comment_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
-    if let (nt, Some(n)) = t.next_char() {
+    if let (nt, Some(n)) = t.next() {
         if n == '/' {
             t = nt;
         } else {
@@ -262,7 +262,7 @@ fn lex_inline_comment_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Opti
     } else {
         return (ot, None);
     }
-    if let (nt, Some(n)) = t.next_char() {
+    if let (nt, Some(n)) = t.next() {
         if n == '/' {
             t = nt;
         } else {
@@ -272,7 +272,7 @@ fn lex_inline_comment_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Opti
         return (ot, None);
     }
     let start = t.clone();
-    while let (nt, Some(n)) = t.next_char() {
+    while let (nt, Some(n)) = t.next() {
         if n != '\n' {
             t = nt;
         } else {
@@ -295,7 +295,7 @@ const WHITESPACE: &str = " \r\n\t";
 
 fn lex_whitespace_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t = ot.clone();
-    if let (nt, Some(n)) = t.next_char() {
+    if let (nt, Some(n)) = t.next() {
         if WHITESPACE.contains(n) {
             t = nt;
         } else {
@@ -304,7 +304,7 @@ fn lex_whitespace_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&
     } else {
         return (ot, None);
     }
-    while let (nt, Some(n)) = t.next_char() {
+    while let (nt, Some(n)) = t.next() {
         if WHITESPACE.contains(n) {
             t = nt;
         } else {
