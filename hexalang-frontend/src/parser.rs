@@ -13,11 +13,38 @@ enum FunctionalNodeType {
     For,
     Process,
     BiOp,
+    UnOp,
     Pipe,
     Int,
     Float,
     String,
     Block,
+}
+
+enum UnOp {
+    Minus = 0,
+    Not = 1,
+    Plus = 2,
+}
+
+enum BiOp {
+    Plus = 0,
+    Minus = 1,
+    Mul = 2,
+    Div = 3,
+    Mod = 4,
+    Rsh = 5,
+    Lsh = 6,
+    And = 7,
+    Xor = 9,
+    Or = 10,
+    Lor = 11,
+    Land = 12,
+    Eq = 13,
+    Gte = 14,
+    Gt = 15,
+    Lte = 16,
+    Lt = 17,
 }
 
 #[derive(Clone)]
@@ -175,7 +202,7 @@ impl<'a> SourceReader<'a> {
         }
     }
 
-    fn next(&mut self) -> (Self, Option<Token>) {
+    fn next(&self) -> (Self, Option<Token>) {
         if self.tokens_offset >= self.tokens.len() {
             return (self.clone(), None);
         }
@@ -240,7 +267,7 @@ impl<'source> Tree<'source> {
 
     fn parse_number<'a>(
         &mut self,
-        mut source: SourceReader<'a>,
+        source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
         let (nsource, value) = source.next();
         if let Some(value) = value {
@@ -268,13 +295,23 @@ impl<'source> Tree<'source> {
                 MessageContext::Functional(FunctionalNodeType::Int),
                 source.offset(),
             );
+            return (
+                nsource,
+                Some(FunctionalNode {
+                    primary_token: source.offset(),
+                    data1: NULL,
+                    data2: NULL,
+                    additional_data: 0,
+                    node_type: FunctionalNodeType::Int,
+                }),
+            );
         }
         return (nsource, None);
     }
 
-    fn parse_expression<'a>(
+    fn parse_literal<'a>(
         &mut self,
-        mut source: SourceReader<'a>,
+        source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
         if let (nsource, Some(t)) = source.next() {
             match t.value() {
@@ -294,6 +331,68 @@ impl<'source> Tree<'source> {
         } else {
             return (source, None);
         }
+    }
+
+    fn parse_unary_prefixed<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, t) = source.next();
+        if let Some(t) = t {
+            let unop = match t.value() {
+                TokenValue::Minus => Some(UnOp::Minus),
+                TokenValue::Plus => Some(UnOp::Plus),
+                TokenValue::Not => Some(UnOp::Not),
+                _ => None,
+            };
+            if unop.is_none() {
+                return (source, None);
+            }
+            let op = unop.unwrap();
+            if let (nsource, Some(expr)) = self.parse_expression(nsource.clone()) {
+                return (
+                    nsource,
+                    Some(FunctionalNode {
+                        data1: op as u32,
+                        data2: self.functional_nodes.allocate(expr),
+                        additional_data: 0,
+                        primary_token: source.offset(),
+                        node_type: FunctionalNodeType::UnOp,
+                    }),
+                );
+            } else {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::ValueExpected,
+                    MessageContext::Functional(FunctionalNodeType::UnOp),
+                    nsource.offset(),
+                );
+                return (
+                    nsource,
+                    Some(FunctionalNode {
+                        data1: NULL,
+                        data2: NULL,
+                        additional_data: 0,
+                        primary_token: source.offset(),
+                        node_type: FunctionalNodeType::UnOp,
+                    }),
+                );
+            }
+        }
+        return (source, None);
+    }
+
+    fn parse_expression<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        if let (nsource, Some(v)) = self.parse_unary_prefixed(source.clone()) {
+            return (nsource, Some(v));
+        }
+        if let (nsource, Some(v)) = self.parse_literal(source.clone()) {
+            return (nsource, Some(v));
+        }
+        return (source, None);
     }
 
     fn parse_type<'a>(&mut self, source: SourceReader<'a>) -> (SourceReader<'a>, Option<TypeNode>) {
