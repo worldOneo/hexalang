@@ -19,6 +19,7 @@ enum FunctionalNodeType {
     Float,
     String,
     Block,
+    MemberAccess,
 }
 
 enum UnOp {
@@ -27,6 +28,7 @@ enum UnOp {
     Plus = 2,
 }
 
+#[derive(Clone)]
 enum BiOp {
     Plus = 0,
     Minus = 1,
@@ -81,6 +83,7 @@ struct TypeNode {
 
 #[derive(Clone)]
 struct FunctionSignature {
+    primary_token: u32,
     parameters: Vec<(u32, TypeNode)>, // (identifieridx, TypeNode)
     return_type: TypeNode,
 }
@@ -121,6 +124,7 @@ enum MessageType {
     SquareExpected,
     EQExpected,
     Literal,
+    IdentifierExpected,
 }
 
 #[derive(Clone)]
@@ -309,6 +313,120 @@ impl<'source> Tree<'source> {
         return (nsource, None);
     }
 
+    fn binary_operator_weight(op: BiOp) -> u32 {
+        match op {
+            BiOp::Land | BiOp::Lor => 5,
+            BiOp::Eq | BiOp::Gt | BiOp::Gte | BiOp::Lt | BiOp::Lte => 10,
+            BiOp::Plus | BiOp::Minus => 15,
+            BiOp::Div | BiOp::Mod | BiOp::Mul => 20,
+            BiOp::And | BiOp::Or | BiOp::Xor | BiOp::Lsh | BiOp::Rsh => 25,
+        }
+    }
+
+    fn token_to_binary_operator(token: TokenValue) -> Option<BiOp> {
+        match token {
+            TokenValue::Hat => Some(BiOp::Xor),
+            TokenValue::And => Some(BiOp::And),
+            TokenValue::Land => Some(BiOp::Land),
+            TokenValue::Or => Some(BiOp::Or),
+            TokenValue::Lor => Some(BiOp::Lor),
+            TokenValue::Plus => Some(BiOp::Plus),
+            TokenValue::Minus => Some(BiOp::Minus),
+            TokenValue::Mul => Some(BiOp::Mul),
+            TokenValue::Div => Some(BiOp::Div),
+            TokenValue::Mod => Some(BiOp::Mod),
+            TokenValue::EQEQ => Some(BiOp::Eq),
+            TokenValue::GTEQ => Some(BiOp::Gte),
+            TokenValue::LTEQ => Some(BiOp::Lte),
+            TokenValue::GT => Some(BiOp::Gt),
+            TokenValue::LT => Some(BiOp::Lt),
+            TokenValue::ShiftL => Some(BiOp::Lsh),
+            TokenValue::ShiftR => Some(BiOp::Rsh),
+            _ => None,
+        }
+    }
+
+    fn parse_dot_access<'a>(
+        &mut self,
+        lhs: FunctionalNode,
+        weight: u32,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, t) = source.next();
+        if let Some(t) = t {
+            if let TokenValue::Identifier = t.value() {
+                let lhs = FunctionalNode {
+                    primary_token: source.offset(),
+                    data1: self.functional_nodes.allocate(lhs),
+                    data2: source.offset(),
+                    additional_data: 0,
+                    node_type: FunctionalNodeType::MemberAccess,
+                };
+                return self.parse_extension_max_weight(
+                    lhs,
+                    weight,
+                    nsource,
+                );
+            }
+        }
+        self.emit_message(
+            MessageLevel::Error,
+            MessageType::IdentifierExpected,
+            MessageContext::Functional(FunctionalNodeType::MemberAccess),
+            source.offset(),
+        );
+        return (source, None);
+    }
+
+    fn parse_extension_max_weight<'a>(
+        &mut self,
+        lhs: FunctionalNode,
+        weight: u32,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (tokensource, t) = source.next();
+        if let None = t {
+            return (source, None);
+        }
+
+        let t = t.unwrap();
+        if let Some(op) = Self::token_to_binary_operator(t.value()) {
+            let next_weight = Self::binary_operator_weight(op.clone());
+            if next_weight <= weight {
+                return (source, None);
+            }
+            let (nsource, rhs) = self.parse_expression(next_weight, tokensource.clone());
+            let rhs = if let Some(rhs) = rhs {
+                self.functional_nodes.allocate(rhs)
+            } else {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::ValueExpected,
+                    MessageContext::Functional(FunctionalNodeType::BiOp),
+                    tokensource.offset(),
+                );
+                NULL
+            };
+            return (
+                nsource,
+                Some(FunctionalNode {
+                    primary_token: tokensource.offset(),
+                    data1: self.functional_nodes.allocate(lhs),
+                    data2: rhs,
+                    additional_data: op as u16,
+                    node_type: FunctionalNodeType::BiOp,
+                }),
+            );
+        }
+
+        match t.value() {
+            TokenValue::Dot => {}
+            TokenValue::ParenOpen => {}
+            _ => {}
+        }
+        return (source, None);
+    }
+
     fn parse_literal<'a>(
         &mut self,
         source: SourceReader<'a>,
@@ -335,6 +453,7 @@ impl<'source> Tree<'source> {
 
     fn parse_unary_prefixed<'a>(
         &mut self,
+        weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
         let (nsource, t) = source.next();
@@ -349,7 +468,7 @@ impl<'source> Tree<'source> {
                 return (source, None);
             }
             let op = unop.unwrap();
-            if let (nsource, Some(expr)) = self.parse_expression(nsource.clone()) {
+            if let (nsource, Some(expr)) = self.parse_expression(weight, nsource.clone()) {
                 return (
                     nsource,
                     Some(FunctionalNode {
@@ -384,15 +503,22 @@ impl<'source> Tree<'source> {
 
     fn parse_expression<'a>(
         &mut self,
+        weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        if let (nsource, Some(v)) = self.parse_unary_prefixed(source.clone()) {
-            return (nsource, Some(v));
+        let maybe_expr =
+            if let (nsource, Some(v)) = self.parse_unary_prefixed(weight, source.clone()) {
+                (nsource, Some(v))
+            } else if let (nsource, Some(v)) = self.parse_literal(source.clone()) {
+                (nsource, Some(v))
+            } else {
+                (source, None)
+            };
+
+        if let (nsource, Some(v)) = maybe_expr {
+            return self.parse_extension_max_weight(v, weight, nsource);
         }
-        if let (nsource, Some(v)) = self.parse_literal(source.clone()) {
-            return (nsource, Some(v));
-        }
-        return (source, None);
+        return maybe_expr;
     }
 
     fn parse_type<'a>(&mut self, source: SourceReader<'a>) -> (SourceReader<'a>, Option<TypeNode>) {
@@ -450,7 +576,7 @@ impl<'source> Tree<'source> {
                 source.offset(),
             );
         }
-        let (nsource, expression) = self.parse_expression(source);
+        let (nsource, expression) = self.parse_expression(0, source);
         if let Some(expression) = expression {
             fnode.data2 = self.functional_nodes.allocate(expression);
         } else {
