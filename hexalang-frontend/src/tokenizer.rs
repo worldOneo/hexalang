@@ -75,7 +75,7 @@ pub struct SourceReader<'a> {
 }
 
 impl<'a> SourceReader<'a> {
-    fn new(data: &'a Vec<char>, file_name: Rc<String>) -> Self {
+    pub fn new(data: &'a Vec<char>, file_name: Rc<String>) -> Self {
         return Self {
             file: file_name,
             offset: 0,
@@ -471,9 +471,7 @@ impl<'a> Iterator for TokenIterator<'a> {
     }
 }
 
-pub fn tokenize(input: String) -> Vec<Token> {
-    let chars = input.chars().collect();
-    let source = SourceReader::new(&chars, Rc::new(String::from("shell")));
+pub fn tokenize<'a>(source: SourceReader<'a>) -> Vec<Token> {
     return TokenIterator {
         source,
         to_emit: VecDeque::new(),

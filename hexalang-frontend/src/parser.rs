@@ -1,9 +1,9 @@
 use crate::tokenizer::{self, Token, TokenValue};
 
-const NULL: u32 = 4294967295;
+pub const NULL: u32 = 4294967295;
 
 #[derive(Debug, Clone)]
-enum FunctionalNodeType {
+pub enum FunctionalNodeType {
     Fn,
     Assign,
     ValAssign,
@@ -22,14 +22,15 @@ enum FunctionalNodeType {
     MemberAccess,
 }
 
-enum UnOp {
+#[derive(Clone)]
+pub enum UnOp {
     Minus = 0,
     Not = 1,
     Plus = 2,
 }
 
-#[derive(Clone)]
-enum BiOp {
+#[derive(Clone, Debug)]
+pub enum BiOp {
     Plus = 0,
     Minus = 1,
     Mul = 2,
@@ -49,17 +50,42 @@ enum BiOp {
     Lt = 17,
 }
 
-#[derive(Clone)]
-struct FunctionalNode {
-    primary_token: u32,
-    data1: u32,
-    data2: u32,
-    additional_data: u16,
-    node_type: FunctionalNodeType,
+impl From<u16> for BiOp {
+    fn from(value: u16) -> Self {
+        match value {
+            0 => BiOp::Plus,
+            1 => BiOp::Minus,
+            2 => BiOp::Mul,
+            3 => BiOp::Div,
+            4 => BiOp::Mod,
+            5 => BiOp::Rsh,
+            6 => BiOp::Lsh,
+            7 => BiOp::And,
+            9 => BiOp::Xor,
+            10 => BiOp::Or,
+            11 => BiOp::Lor,
+            12 => BiOp::Land,
+            13 => BiOp::Eq,
+            14 => BiOp::Gte,
+            15 => BiOp::Gt,
+            16 => BiOp::Lte,
+            17 => BiOp::Lt,
+            _ => BiOp::Lt,
+        }
+    }
 }
 
 #[derive(Clone)]
-enum TypeNodeType {
+pub struct FunctionalNode {
+    pub primary_token: u32,
+    pub data1: u32,
+    pub data2: u32,
+    pub additional_data: u16,
+    pub node_type: FunctionalNodeType,
+}
+
+#[derive(Clone)]
+pub enum TypeNodeType {
     Bool,
     U8,
     I8,
@@ -82,33 +108,33 @@ struct TypeNode {
 }
 
 #[derive(Clone)]
-struct FunctionSignature {
-    primary_token: u32,
-    parameters: Vec<(u32, TypeNode)>, // (identifieridx, TypeNode)
-    return_type: TypeNode,
+pub struct FunctionSignature {
+    pub primary_token: u32,
+    pub parameters: Vec<(u32, TypeNode)>, // (identifieridx, TypeNode)
+    pub return_type: TypeNode,
 }
 
 #[derive(Clone)]
-struct Identifier {
-    sourcefile: u32,
-    offset: u32,
+pub struct Identifier {
+    pub sourcefile: u32,
+    pub offset: u32,
 }
 
 #[derive(Clone)]
-struct TypedIdentifier {
-    sourcefile: u32,
-    offset: u32,
-    type_node: TypeNode,
+pub struct TypedIdentifier {
+    pub sourcefile: u32,
+    pub offset: u32,
+    pub type_node: TypeNode,
 }
 
 #[derive(Clone)]
-struct Assign {
-    identifier: u32,
-    value: FunctionalNode,
+pub struct Assign {
+    pub identifier: u32,
+    pub value: FunctionalNode,
 }
 
 #[derive(Clone)]
-enum MessageLevel {
+pub enum MessageLevel {
     Debug,
     Info,
     Warning,
@@ -116,7 +142,7 @@ enum MessageLevel {
 }
 
 #[derive(Clone)]
-enum MessageType {
+pub enum MessageType {
     TypeExpected,
     ValueExpected,
     BraceExpected,
@@ -128,20 +154,20 @@ enum MessageType {
 }
 
 #[derive(Clone)]
-enum MessageContext {
+pub enum MessageContext {
     Type(TypeNodeType),
     Functional(FunctionalNodeType),
 }
 
 #[derive(Clone)]
-struct Message {
-    token: u32,
-    level: MessageLevel,
-    message: MessageType,
-    context: MessageContext,
+pub struct Message {
+    pub token: u32,
+    pub level: MessageLevel,
+    pub message: MessageType,
+    pub context: MessageContext,
 }
 
-struct BumpStorage<T>
+pub struct BumpStorage<T>
 where
     T: Clone,
 {
@@ -163,29 +189,29 @@ impl<T> BumpStorage<T>
 where
     T: Clone,
 {
-    fn allocate(&mut self, t: T) -> u32 {
+    pub fn allocate(&mut self, t: T) -> u32 {
         self.data.push(t);
         return (self.data.len() - 1) as u32;
     }
 
-    fn receive(&mut self, ptr: u32) -> T {
+    pub fn receive(&mut self, ptr: u32) -> T {
         return self.data[ptr as usize].clone();
     }
 }
 
-struct Tree<'a> {
-    identifiers: BumpStorage<Identifier>,
-    signatures: BumpStorage<FunctionSignature>,
-    typed_identifier: BumpStorage<TypedIdentifier>,
-    assign: BumpStorage<Assign>,
-    integers: BumpStorage<u64>,
-    float: BumpStorage<f64>,
-    block: BumpStorage<Vec<FunctionalNode>>,
+pub struct Tree<'a> {
+    pub identifiers: BumpStorage<Identifier>,
+    pub signatures: BumpStorage<FunctionSignature>,
+    pub typed_identifier: BumpStorage<TypedIdentifier>,
+    pub assign: BumpStorage<Assign>,
+    pub integers: BumpStorage<u64>,
+    pub float: BumpStorage<f64>,
+    pub block: BumpStorage<Vec<FunctionalNode>>,
 
-    type_nodes: BumpStorage<TypeNode>,
-    functional_nodes: BumpStorage<FunctionalNode>,
+    pub type_nodes: BumpStorage<TypeNode>,
+    pub functional_nodes: BumpStorage<FunctionalNode>,
 
-    messages: Vec<Message>,
+    pub messages: Vec<Message>,
     used: bool,
 
     source: tokenizer::SourceReader<'a>,
@@ -251,9 +277,27 @@ impl<'source> Tree<'source> {
         }
     }
 
-    pub fn parse(&mut self) {
+    pub fn parse(&mut self) -> Vec<FunctionalNode> {
         assert!(!self.used, "tried to parse into a used tree");
         self.used = true;
+        let mut top_level = vec![];
+        let tokens = self.tokens.clone();
+        let mut source = SourceReader::new(&tokens);
+        while let (nsource, Some(s)) = self.parse_statement(source) {
+            top_level.push(s);
+            source = nsource;
+        }
+        top_level
+    }
+
+    fn next_token<'a>(mut source: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+        while let (nsource, Some(t)) = source.next() {
+            if t.value() != TokenValue::Whitespace && t.value() != TokenValue::InlineComment {
+                return (nsource, Some(t));
+            }
+            source = nsource;
+        }
+        return (source, None);
     }
 
     fn to_integer(chars: &[char]) -> Option<u64> {
@@ -362,11 +406,7 @@ impl<'source> Tree<'source> {
                     additional_data: 0,
                     node_type: FunctionalNodeType::MemberAccess,
                 };
-                return self.parse_extension_max_weight(
-                    lhs,
-                    weight,
-                    nsource,
-                );
+                return self.parse_extension_max_weight(lhs, weight, nsource);
             }
         }
         self.emit_message(
@@ -419,12 +459,11 @@ impl<'source> Tree<'source> {
             );
         }
 
-        match t.value() {
-            TokenValue::Dot => {}
-            TokenValue::ParenOpen => {}
-            _ => {}
-        }
-        return (source, None);
+        return match t.value() {
+            TokenValue::Dot => self.parse_dot_access(lhs, weight, tokensource),
+            // TokenValue::ParenOpen => {}
+            _ => (source, None),
+        };
     }
 
     fn parse_literal<'a>(
@@ -515,8 +554,17 @@ impl<'source> Tree<'source> {
                 (source, None)
             };
 
-        if let (nsource, Some(v)) = maybe_expr {
-            return self.parse_extension_max_weight(v, weight, nsource);
+        if let (nsource, Some(v)) = maybe_expr.clone() {
+            if let (mut nsource, Some(mut v)) = self.parse_extension_max_weight(v, weight, nsource)
+            {
+                while let (nnsource, Some(nv)) =
+                    self.parse_extension_max_weight(v.clone(), weight, nsource.clone())
+                {
+                    nsource = nnsource;
+                    v = nv;
+                }
+                return (nsource, Some(v));
+            }
         }
         return maybe_expr;
     }
@@ -590,6 +638,22 @@ impl<'source> Tree<'source> {
         source = nsource;
 
         return (source, Some(fnode));
+    }
+
+    fn parse_statement<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, statement) = self.parse_init(source.clone());
+        if let Some(_) = statement {
+            return (nsource, statement);
+        }
+
+        let (nsource, expression) = self.parse_expression(0, source.clone());
+        if let Some(_) = expression {
+            return (nsource, expression);
+        }
+        return (source, None);
     }
 
     fn emit_message(
