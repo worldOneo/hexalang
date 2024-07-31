@@ -84,7 +84,7 @@ pub struct FunctionalNode {
     pub node_type: FunctionalNodeType,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum TypeNodeType {
     Bool,
     U8,
@@ -133,7 +133,7 @@ pub struct Assign {
     pub value: FunctionalNode,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum MessageLevel {
     Debug,
     Info,
@@ -141,7 +141,7 @@ pub enum MessageLevel {
     Error,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum MessageType {
     TypeExpected,
     ValueExpected,
@@ -153,13 +153,13 @@ pub enum MessageType {
     IdentifierExpected,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum MessageContext {
     Type(TypeNodeType),
     Functional(FunctionalNodeType),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Message {
     pub token: u32,
     pub level: MessageLevel,
@@ -244,15 +244,6 @@ impl<'a> SourceReader<'a> {
         return (read_continue, Some(token));
     }
 
-    fn expect(&mut self, value: TokenValue) -> (Self, Option<Token>) {
-        if let (n, Some(t)) = self.next() {
-            if t.value() == value {
-                return (n, Some(t));
-            }
-        }
-        return (self.clone(), None);
-    }
-
     fn offset(&self) -> u32 {
         return self.tokens_offset as u32;
     }
@@ -290,12 +281,33 @@ impl<'source> Tree<'source> {
         top_level
     }
 
-    fn next_token<'a>(mut source: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
+    fn next<'a>(mut source: SourceReader<'a>) -> (SourceReader<'a>, Option<Token>) {
         while let (nsource, Some(t)) = source.next() {
             if t.value() != TokenValue::Whitespace && t.value() != TokenValue::InlineComment {
                 return (nsource, Some(t));
             }
             source = nsource;
+        }
+        return (source, None);
+    }
+
+    fn expect<'a>(source: SourceReader<'a>, v: TokenValue) -> (SourceReader<'a>, Option<Token>) {
+        if let (nsource, Some(t)) = Self::next(source.clone()) {
+            if t.value() == v {
+                return (nsource, Some(t));
+            }
+        }
+        return (source, None);
+    }
+
+    fn expect_any<'a, const N: usize>(
+        source: SourceReader<'a>,
+        v: [TokenValue; N],
+    ) -> (SourceReader<'a>, Option<Token>) {
+        if let (nsource, Some(t)) = Self::next(source.clone()) {
+            if v.contains(&t.value()) {
+                return (nsource, Some(t));
+            }
         }
         return (source, None);
     }
@@ -317,7 +329,7 @@ impl<'source> Tree<'source> {
         &mut self,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let (nsource, value) = source.next();
+        let (nsource, value) = Self::next(source.clone());
         if let Some(value) = value {
             if TokenValue::Number != value.value() {
                 return (nsource, None);
@@ -396,7 +408,7 @@ impl<'source> Tree<'source> {
         weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let (nsource, t) = source.next();
+        let (nsource, t) = Self::next(source.clone());
         if let Some(t) = t {
             if let TokenValue::Identifier = t.value() {
                 let lhs = FunctionalNode {
@@ -424,7 +436,7 @@ impl<'source> Tree<'source> {
         weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let (tokensource, t) = source.next();
+        let (tokensource, t) = Self::next(source.clone());
         if let None = t {
             return (source, None);
         }
@@ -470,7 +482,7 @@ impl<'source> Tree<'source> {
         &mut self,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        if let (nsource, Some(t)) = source.next() {
+        if let (nsource, Some(t)) = Self::next(source.clone()) {
             match t.value() {
                 TokenValue::String => (
                     nsource,
@@ -495,7 +507,7 @@ impl<'source> Tree<'source> {
         weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let (nsource, t) = source.next();
+        let (nsource, t) = Self::next(source.clone());
         if let Some(t) = t {
             let unop = match t.value() {
                 TokenValue::Minus => Some(UnOp::Minus),
@@ -555,8 +567,8 @@ impl<'source> Tree<'source> {
             };
 
         if let (nsource, Some(v)) = maybe_expr.clone() {
-            if let (mut nsource, Some(mut v)) = self.parse_extension_max_weight(v, weight, nsource)
-            {
+            let extensioned = self.parse_extension_max_weight(v, weight, nsource);
+            if let (mut nsource, Some(mut v)) = extensioned {
                 while let (nnsource, Some(nv)) =
                     self.parse_extension_max_weight(v.clone(), weight, nsource.clone())
                 {
@@ -575,10 +587,10 @@ impl<'source> Tree<'source> {
 
     fn parse_init<'a>(
         &mut self,
-        mut source: SourceReader<'a>,
+        source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
         let primary = source.offset();
-        let (mut source, t) = source.next();
+        let (source, t) = Self::next(source);
         if let None = t {
             return (source, None);
         }
@@ -601,7 +613,7 @@ impl<'source> Tree<'source> {
             },
         };
 
-        let (mut source, value) = source.expect(TokenValue::Colon);
+        let (source, value) = Self::expect(source, TokenValue::Colon);
         if value.is_some() {
             let (source, _type) = self.parse_type(source.clone());
             if let Some(tnode) = _type {
@@ -615,7 +627,7 @@ impl<'source> Tree<'source> {
                 );
             }
         }
-        let (mut source, value) = source.expect(TokenValue::EQ);
+        let (mut source, value) = Self::expect(source, TokenValue::EQ);
         if !value.is_some() {
             self.emit_message(
                 MessageLevel::Error,
@@ -648,10 +660,57 @@ impl<'source> Tree<'source> {
         if let Some(_) = statement {
             return (nsource, statement);
         }
+        let (nsource, statement) = self.parse_block(source.clone());
+        if let Some(_) = statement {
+            return (nsource, statement);
+        }
 
         let (nsource, expression) = self.parse_expression(0, source.clone());
         if let Some(_) = expression {
             return (nsource, expression);
+        }
+        return (source, None);
+    }
+
+    fn parse_block<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let primary = source.offset();
+
+        if let (mut nsource, Some(_)) = Self::expect(source.clone(), TokenValue::BraceOpen) {
+            let mut block = vec![];
+            while let (nnsource, Some(t)) = self.parse_statement(nsource.clone()) {
+                block.push(t);
+                nsource = nnsource;
+            }
+
+            let brclose = Self::expect_any(
+                nsource.clone(),
+                [TokenValue::BraceClose, TokenValue::PhantomBraceClose],
+            );
+
+            let ret = if let (nnsource, Some(t)) = brclose {
+                nsource = nnsource;
+                if t.value() == TokenValue::PhantomBraceClose {
+                    self.emit_message(
+                        MessageLevel::Error,
+                        MessageType::BraceExpected,
+                        MessageContext::Functional(FunctionalNodeType::Block),
+                        primary,
+                    );
+                }
+                Some(FunctionalNode {
+                    primary_token: primary,
+                    data1: self.block.allocate(block),
+                    data2: NULL,
+                    additional_data: 0,
+                    node_type: FunctionalNodeType::Block,
+                })
+            } else {
+                None
+            };
+            return (nsource, ret);
         }
         return (source, None);
     }

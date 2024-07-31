@@ -4,7 +4,7 @@ mod tokenizer;
 mod parser;
 
 fn main() {
-    let src = "1+1*2==1*2+2".chars().collect();
+    let src = "1 // this is a one btw\n+1*2==1*2+2".chars().collect();
     let source = tokenizer::SourceReader::new(&src, Rc::new("shell".into()));
     dbg!(tokenizer::tokenize(source.clone()));
     let mut tree = parser::Tree::new(source.clone(), tokenizer::tokenize(source));
