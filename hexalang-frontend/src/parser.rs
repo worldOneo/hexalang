@@ -10,6 +10,7 @@ pub enum FunctionalNodeType {
     VarAssign,
     Type,
     If,
+    Else,
     For,
     Process,
     BiOp,
@@ -86,15 +87,7 @@ pub struct FunctionalNode {
 
 #[derive(Debug, Clone)]
 pub enum TypeNodeType {
-    Bool,
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    U64,
-    I64,
+    Alias,
     Array,
     Struct,
 }
@@ -116,15 +109,13 @@ pub struct FunctionSignature {
 
 #[derive(Clone)]
 pub struct Identifier {
-    pub sourcefile: u32,
-    pub offset: u32,
+    pub primary_token: u32,
 }
 
 #[derive(Clone)]
 pub struct TypedIdentifier {
-    pub sourcefile: u32,
-    pub offset: u32,
-    pub type_node: TypeNode,
+    pub primary_token: u32,
+    pub type_node: u32,
 }
 
 #[derive(Clone)]
@@ -145,6 +136,7 @@ pub enum MessageLevel {
 pub enum MessageType {
     TypeExpected,
     ValueExpected,
+    StatementExpected,
     BraceExpected,
     ParenExpected,
     SquareExpected,
@@ -196,6 +188,14 @@ where
 
     pub fn receive(&mut self, ptr: u32) -> T {
         return self.data[ptr as usize].clone();
+    }
+
+    pub fn allocate_or(&mut self, t: Option<T>, u: u32) -> u32 {
+        if let Some(t) = t {
+            self.allocate(t)
+        } else {
+            u
+        }
     }
 }
 
@@ -613,11 +613,26 @@ impl<'source> Tree<'source> {
             },
         };
 
-        let (source, value) = Self::expect(source, TokenValue::Colon);
-        if value.is_some() {
+        let mut typed_identifier = TypedIdentifier {
+            primary_token: source.offset(),
+            type_node: NULL,
+        };
+
+        let (source, identifier) = Self::expect(source, TokenValue::Identifier);
+        if identifier.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::IdentifierExpected,
+                MessageContext::Functional(fnode.node_type.clone()),
+                source.offset(),
+            );
+        }
+
+        let (source, colon) = Self::expect(source, TokenValue::Colon);
+        if colon.is_some() {
             let (source, _type) = self.parse_type(source.clone());
             if let Some(tnode) = _type {
-                fnode.data1 = self.type_nodes.allocate(tnode);
+                typed_identifier.type_node = self.type_nodes.allocate(tnode);
             } else {
                 self.emit_message(
                     MessageLevel::Error,
@@ -627,8 +642,11 @@ impl<'source> Tree<'source> {
                 );
             }
         }
-        let (mut source, value) = Self::expect(source, TokenValue::EQ);
-        if !value.is_some() {
+
+        fnode.data1 = self.typed_identifier.allocate(typed_identifier);
+
+        let (mut source, eq) = Self::expect(source, TokenValue::EQ);
+        if !eq.is_some() {
             self.emit_message(
                 MessageLevel::Error,
                 MessageType::EQExpected,
@@ -636,6 +654,7 @@ impl<'source> Tree<'source> {
                 source.offset(),
             );
         }
+
         let (nsource, expression) = self.parse_expression(0, source);
         if let Some(expression) = expression {
             fnode.data2 = self.functional_nodes.allocate(expression);
@@ -661,6 +680,11 @@ impl<'source> Tree<'source> {
             return (nsource, statement);
         }
         let (nsource, statement) = self.parse_block(source.clone());
+        if let Some(_) = statement {
+            return (nsource, statement);
+        }
+
+        let (nsource, statement) = self.parse_if(source.clone());
         if let Some(_) = statement {
             return (nsource, statement);
         }
@@ -713,6 +737,64 @@ impl<'source> Tree<'source> {
             return (nsource, ret);
         }
         return (source, None);
+    }
+
+    fn parse_if<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, t) = Self::expect(source.clone(), TokenValue::If);
+        if t.is_none() {
+            return (source, None);
+        }
+        let (nsource, condition) = self.parse_expression(0, nsource);
+        if condition.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::ValueExpected,
+                MessageContext::Functional(FunctionalNodeType::If),
+                source.offset(),
+            );
+        }
+        let (nsource, statement) = self.parse_statement(nsource.clone());
+        if statement.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::StatementExpected,
+                MessageContext::Functional(FunctionalNodeType::If),
+                source.offset(),
+            );
+        }
+        let if_node = FunctionalNode {
+            primary_token: source.offset(),
+            data1: self.functional_nodes.allocate_or(condition, NULL),
+            data2: self.functional_nodes.allocate_or(statement, NULL),
+            additional_data: 0,
+            node_type: FunctionalNodeType::If,
+        };
+        let (elsesource, elsetoken) = Self::expect(nsource.clone(), TokenValue::Else);
+        if let Some(_) = elsetoken {
+            let (stmtsource, elsestatement) = self.parse_statement(elsesource.clone());
+            if elsestatement.is_none() {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::StatementExpected,
+                    MessageContext::Functional(FunctionalNodeType::Else),
+                    elsesource.offset(),
+                );
+            } else {
+                let else_node = FunctionalNode {
+                    primary_token: nsource.offset(),
+                    data1: self.functional_nodes.allocate(if_node),
+                    data2: self.functional_nodes.allocate_or(elsestatement, NULL),
+                    additional_data: 0,
+                    node_type: FunctionalNodeType::Else,
+                };
+                return (stmtsource, Some(else_node));
+            }
+            return (elsesource, Some(if_node));
+        }
+        return (nsource, Some(if_node));
     }
 
     fn emit_message(
