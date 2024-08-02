@@ -4,7 +4,7 @@ mod tokenizer;
 mod parser;
 
 fn main() {
-    let src = "if 1 // this is a one btw\n+1*2==1*2+2 var a = 1 else 1+1".chars().collect();
+    let src = "if 1 // this is a one btw\n+1*2==1*2+2 var a = 1 else 1+1 val test = fn(a: int, b) a + b".chars().collect();
     let source = tokenizer::SourceReader::new(&src, Rc::new("shell".into()));
     let tokens = tokenizer::tokenize(source.clone());
     let mut tree = parser::Tree::new(source.clone(), tokens);

@@ -1,3 +1,5 @@
+use std::ptr::null;
+
 use crate::tokenizer::{self, Token, TokenValue};
 
 pub const NULL: u32 = 4294967295;
@@ -103,8 +105,8 @@ struct TypeNode {
 #[derive(Clone)]
 pub struct FunctionSignature {
     pub primary_token: u32,
-    pub parameters: Vec<(u32, TypeNode)>, // (identifieridx, TypeNode)
-    pub return_type: TypeNode,
+    pub parameters: Vec<TypedIdentifier>,
+    pub return_type: u32,
 }
 
 #[derive(Clone)]
@@ -140,6 +142,7 @@ pub enum MessageType {
     BraceExpected,
     ParenExpected,
     SquareExpected,
+    CommaExpected,
     EQExpected,
     Literal,
     IdentifierExpected,
@@ -557,14 +560,30 @@ impl<'source> Tree<'source> {
         weight: u32,
         source: SourceReader<'a>,
     ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let maybe_expr =
-            if let (nsource, Some(v)) = self.parse_unary_prefixed(weight, source.clone()) {
-                (nsource, Some(v))
-            } else if let (nsource, Some(v)) = self.parse_literal(source.clone()) {
-                (nsource, Some(v))
-            } else {
-                (source, None)
-            };
+        let maybe_expr = if let (nsource, Some(v)) =
+            self.parse_unary_prefixed(weight, source.clone())
+        {
+            (nsource, Some(v))
+        } else if let (nsource, Some(v)) = self.parse_literal(source.clone()) {
+            (nsource, Some(v))
+        } else if let (nsource, Some(v)) = self.parse_fn(source.clone()) {
+            (nsource, Some(v))
+        } else if let (nsource, Some(_)) = Self::expect(source.clone(), TokenValue::Identifier) {
+            (
+                nsource,
+                Some(FunctionalNode {
+                    primary_token: source.offset(),
+                    data1: self.identifiers.allocate(Identifier {
+                        primary_token: source.offset(),
+                    }),
+                    data2: NULL,
+                    additional_data: 0,
+                    node_type: FunctionalNodeType::Fn,
+                }),
+            )
+        } else {
+            (source, None)
+        };
 
         if let (nsource, Some(v)) = maybe_expr.clone() {
             let extensioned = self.parse_extension_max_weight(v, weight, nsource);
@@ -582,7 +601,19 @@ impl<'source> Tree<'source> {
     }
 
     fn parse_type<'a>(&mut self, source: SourceReader<'a>) -> (SourceReader<'a>, Option<TypeNode>) {
-        todo!();
+        if let (nsource, Some(_)) = Self::expect(source.clone(), TokenValue::Identifier) {
+            (
+                nsource,
+                Some(TypeNode {
+                    primary_token: source.offset(),
+                    data: NULL,
+                    additional_data: 0,
+                    node_type: TypeNodeType::Alias,
+                }),
+            )
+        } else {
+            (source, None)
+        }
     }
 
     fn parse_init<'a>(
@@ -795,6 +826,119 @@ impl<'source> Tree<'source> {
             return (elsesource, Some(if_node));
         }
         return (nsource, Some(if_node));
+    }
+
+    fn parse_fn<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, fntoken) = Self::expect(source.clone(), TokenValue::Fn);
+        if fntoken.is_none() {
+            return (source, None);
+        }
+        let (mut psource, popen) = Self::expect(nsource.clone(), TokenValue::ParenOpen);
+        if popen.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::ParenExpected,
+                MessageContext::Functional(FunctionalNodeType::Fn),
+                nsource.offset(),
+            );
+            psource = nsource;
+        }
+        let mut args = vec![];
+        while let (_, None) = Self::expect_any(
+            psource.clone(),
+            [TokenValue::ParenClose, TokenValue::PhantomParenClose],
+        ) {
+            let mut typed_id = TypedIdentifier {
+                primary_token: psource.offset(),
+                type_node: NULL,
+            };
+            let (mut idsource, id) = Self::expect(psource.clone(), TokenValue::Identifier);
+            if id.is_none() {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::IdentifierExpected,
+                    MessageContext::Functional(FunctionalNodeType::Fn),
+                    psource.offset(),
+                );
+                idsource = psource.clone();
+            }
+
+            let (mut csource, colon) = Self::expect(idsource.clone(), TokenValue::Colon);
+            if colon.is_some() {
+                let (tsource, tnode) = self.parse_type(csource.clone());
+                if let Some(t) = tnode {
+                    typed_id.type_node = self.type_nodes.allocate(t);
+                    csource = tsource;
+                } else {
+                    self.emit_message(
+                        MessageLevel::Error,
+                        MessageType::TypeExpected,
+                        MessageContext::Functional(FunctionalNodeType::Fn),
+                        csource.offset(),
+                    );
+                }
+            }
+
+            let (commasource, comma) = Self::next(csource.clone());
+            if let Some(terminator) = comma {
+                args.push(typed_id);
+                if TokenValue::Comma == terminator.value() {
+                    csource = commasource;
+                } else if TokenValue::ParenClose != terminator.value() {
+                    self.emit_message(
+                        MessageLevel::Error,
+                        MessageType::CommaExpected,
+                        MessageContext::Functional(FunctionalNodeType::Fn),
+                        csource.offset(),
+                    );
+                    break;
+                }
+            }
+            psource = csource;
+        }
+
+        let (psource, _) = Self::next(psource);
+
+        let mut signature = FunctionSignature {
+            primary_token: source.offset(),
+            parameters: args,
+            return_type: NULL,
+        };
+        let (mut csource, colon) = Self::expect(psource, TokenValue::Colon);
+        if colon.is_some() {
+            let (tsource, type_node) = self.parse_type(csource.clone());
+            if let Some(node) = type_node {
+                signature.return_type = self.type_nodes.allocate(node);
+                csource = tsource;
+            } else {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::TypeExpected,
+                    MessageContext::Functional(FunctionalNodeType::Fn),
+                    csource.offset(),
+                );
+            }
+        }
+        let (stmtsource, stmtnode) = self.parse_statement(csource);
+        let node = FunctionalNode {
+            primary_token: source.offset(),
+            data1: self.signatures.allocate(signature),
+            data2: self.functional_nodes.allocate_or(stmtnode, NULL),
+            additional_data: 0,
+            node_type: FunctionalNodeType::Fn,
+        };
+        if node.data2 == NULL {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::StatementExpected,
+                MessageContext::Functional(FunctionalNodeType::Fn),
+                source.offset(),
+            );
+        }
+        return (stmtsource, Some(node));
     }
 
     fn emit_message(
