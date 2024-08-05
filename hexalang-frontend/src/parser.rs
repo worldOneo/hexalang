@@ -710,6 +710,10 @@ impl<'source> Tree<'source> {
         if let Some(_) = statement {
             return (nsource, statement);
         }
+        let (nsource, statement) = self.parse_assign(source.clone());
+        if let Some(_) = statement {
+            return (nsource, statement);
+        }
         let (nsource, statement) = self.parse_block(source.clone());
         if let Some(_) = statement {
             return (nsource, statement);
@@ -939,6 +943,37 @@ impl<'source> Tree<'source> {
             );
         }
         return (stmtsource, Some(node));
+    }
+
+    fn parse_assign<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, id) = Self::expect(source.clone(), TokenValue::Identifier);
+        if id.is_none() {
+            return (source, None);
+        }
+        let (nsource, eq) = Self::expect(nsource.clone(), TokenValue::EQ);
+        if eq.is_none() {
+            return (nsource, None);
+        }
+        let (nsource, value) = self.parse_expression(0, nsource.clone());
+        if value.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::ValueExpected,
+                MessageContext::Functional(FunctionalNodeType::Assign),
+                nsource.offset(),
+            );
+        }
+        let fnode = FunctionalNode {
+            primary_token: source.offset(),
+            data1: self.functional_nodes.allocate_or(value, NULL),
+            data2: NULL,
+            additional_data: 0,
+            node_type: FunctionalNodeType::Assign,
+        };
+        return (nsource, Some(fnode));
     }
 
     fn emit_message(
