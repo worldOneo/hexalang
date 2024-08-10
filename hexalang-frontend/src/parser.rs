@@ -990,7 +990,7 @@ impl<'source> Tree<'source> {
             data1: NULL,
             data2: NULL,
             additional_data: 0,
-            node_type: FunctionalNodeType::Assign,
+            node_type: FunctionalNodeType::For,
         };
         let (nsource, condition) = self.parse_statement(nsource);
         if condition.is_none() {
