@@ -1,5 +1,3 @@
-use std::ptr::null;
-
 use crate::tokenizer::{self, Token, TokenValue};
 
 pub const NULL: u32 = 4294967295;
@@ -95,7 +93,7 @@ pub enum TypeNodeType {
 }
 
 #[derive(Clone)]
-struct TypeNode {
+pub struct TypeNode {
     primary_token: u32,
     data: u32,
     additional_data: u16,
@@ -718,8 +716,11 @@ impl<'source> Tree<'source> {
         if let Some(_) = statement {
             return (nsource, statement);
         }
-
         let (nsource, statement) = self.parse_if(source.clone());
+        if let Some(_) = statement {
+            return (nsource, statement);
+        }
+        let (nsource, statement) = self.parse_for(source.clone());
         if let Some(_) = statement {
             return (nsource, statement);
         }
@@ -973,6 +974,46 @@ impl<'source> Tree<'source> {
             additional_data: 0,
             node_type: FunctionalNodeType::Assign,
         };
+        return (nsource, Some(fnode));
+    }
+
+    fn parse_for<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, id) = Self::expect(source.clone(), TokenValue::For);
+        if id.is_none() {
+            return (source, None);
+        }
+        let mut fnode = FunctionalNode {
+            primary_token: source.offset(),
+            data1: NULL,
+            data2: NULL,
+            additional_data: 0,
+            node_type: FunctionalNodeType::Assign,
+        };
+        let (nsource, condition) = self.parse_statement(nsource);
+        if condition.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::StatementExpected,
+                MessageContext::Functional(FunctionalNodeType::For),
+                nsource.offset(),
+            );
+            return (nsource, Some(fnode));
+        }
+        fnode.data1 = self.functional_nodes.allocate_or(condition, NULL);
+        let (nsource, statement) = self.parse_statement(nsource);
+        if statement.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::StatementExpected,
+                MessageContext::Functional(FunctionalNodeType::For),
+                nsource.offset(),
+            );
+            return (nsource, Some(fnode));
+        }
+        fnode.data2 = self.functional_nodes.allocate_or(statement, NULL);
         return (nsource, Some(fnode));
     }
 
