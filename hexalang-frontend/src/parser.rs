@@ -94,10 +94,11 @@ pub enum TypeNodeType {
 
 #[derive(Clone)]
 pub struct TypeNode {
-    primary_token: u32,
-    data: u32,
-    additional_data: u16,
-    node_type: TypeNodeType,
+    pub primary_token: u32,
+    pub data1: u32,
+    pub data2: u32,
+    pub additional_data: u16,
+    pub node_type: TypeNodeType,
 }
 
 #[derive(Clone)]
@@ -598,13 +599,65 @@ impl<'source> Tree<'source> {
         return maybe_expr;
     }
 
+    fn parse_array_type<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<TypeNode>) {
+        let (nsource, sqopen) = Self::expect(source.clone(), TokenValue::SquareOpen);
+        if sqopen.is_none() {
+            return (source, None);
+        }
+        let (sizedsource, expr) = self.parse_expression(0, nsource.clone());
+        let nsource = if expr.is_some() { sizedsource } else { nsource };
+        let data = if let Some(expr) = expr {
+            self.functional_nodes.allocate(expr)
+        } else {
+            NULL
+        };
+        let (closedsource, t) = Self::expect_any(
+            nsource.clone(),
+            [TokenValue::SquareClose, TokenValue::PhantomSquareClose],
+        );
+        if t.is_none() || t.unwrap().value() == TokenValue::PhantomSquareClose {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::SquareExpected,
+                MessageContext::Type(TypeNodeType::Array),
+                nsource.offset(),
+            )
+        }
+        let (tsource, t) = self.parse_type(closedsource.clone());
+        if t.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::TypeExpected,
+                MessageContext::Type(TypeNodeType::Array),
+                closedsource.offset(),
+            )
+        }
+        return (
+            tsource,
+            Some(TypeNode {
+                primary_token: source.offset(),
+                data1: data,
+                data2: self.type_nodes.allocate_or(t, NULL),
+                additional_data: 0,
+                node_type: TypeNodeType::Array,
+            }),
+        );
+    }
+
     fn parse_type<'a>(&mut self, source: SourceReader<'a>) -> (SourceReader<'a>, Option<TypeNode>) {
+        if let (arrsource, Some(arrtype)) = self.parse_array_type(source.clone()) {
+            return (arrsource, Some(arrtype));
+        }
         if let (nsource, Some(_)) = Self::expect(source.clone(), TokenValue::Identifier) {
             (
                 nsource,
                 Some(TypeNode {
                     primary_token: source.offset(),
-                    data: NULL,
+                    data1: NULL,
+                    data2: NULL,
                     additional_data: 0,
                     node_type: TypeNodeType::Alias,
                 }),
@@ -875,6 +928,7 @@ impl<'source> Tree<'source> {
             if colon.is_some() {
                 let (tsource, tnode) = self.parse_type(csource.clone());
                 if let Some(t) = tnode {
+                    println!("Appedingin typenode of type: {:?}", t.node_type);
                     typed_id.type_node = self.type_nodes.allocate(t);
                     csource = tsource;
                 } else {
@@ -888,8 +942,8 @@ impl<'source> Tree<'source> {
             }
 
             let (commasource, comma) = Self::next(csource.clone());
+            args.push(typed_id);
             if let Some(terminator) = comma {
-                args.push(typed_id);
                 if TokenValue::Comma == terminator.value() {
                     csource = commasource;
                 } else if TokenValue::ParenClose != terminator.value() {
