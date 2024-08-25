@@ -79,7 +79,11 @@ impl Compiler {
     }
 
     fn type_to_ir(&mut self, node: &parser::TypeNode, tree: &parser::Tree) -> IRTypeNode {
-        todo!()
+        match node.node_type {
+            parser::TypeNodeType::Alias => todo!(),
+            parser::TypeNodeType::Array => todo!(),
+            parser::TypeNodeType::Struct => todo!(),
+        }
     }
 
     fn nonetype(&mut self, primary_token: u32) -> IRTypeNode {
@@ -109,13 +113,7 @@ impl Compiler {
                 let name = name.unwrap().iter().collect();
                 let register = self.create_rename(&name);
                 self.create_var(register, type_node);
-                self.emit_node(IRNode {
-                    primary_token: line.primary_token,
-                    node_type: IRNodeType::Assign,
-                    data1: register,
-                    data2: result.register,
-                    data3: 0,
-                });
+                self.assign_var(line.primary_token, register, result.register);
             }
             parser::FunctionalNodeType::Type => todo!(),
             parser::FunctionalNodeType::If => todo!(),
@@ -141,7 +139,25 @@ impl Compiler {
     ) -> IRResult {
         match &expression.node_type {
             parser::FunctionalNodeType::Fn => todo!(),
-            parser::FunctionalNodeType::BiOp => todo!(),
+            parser::FunctionalNodeType::BiOp => {
+                let lhs = tree.functional_nodes.receive(expression.data1);
+                let rhs = tree.functional_nodes.receive(expression.data2);
+                let lhs_result = self.eval(expected_type, &lhs, &tree);
+                let rhs_register = self.eval(expected_type, &rhs, &tree);
+                let register = self.new_register();
+                self.emit_node(IRNode {
+                    primary_token: expression.primary_token,
+                    node_type: IRNodeType::BiOp,
+                    data1: lhs_result.register,
+                    data2: rhs_register.register,
+                    data3: expression.additional_data as u64,
+                });
+                self.type_check_registers(lhs_result.register, rhs_register.register);
+                return IRResult {
+                    expression_type: Some(expected_type.clone()),
+                    register,
+                };
+            }
             parser::FunctionalNodeType::UnOp => todo!(),
             parser::FunctionalNodeType::Pipe => todo!(),
             parser::FunctionalNodeType::Int => {
@@ -193,5 +209,26 @@ impl Compiler {
 
     fn create_var(&mut self, register: u32, ty: IRTypeNode) {
         self.current_scope().vars.insert(register, ty);
+    }
+
+    fn type_check(&mut self, a: IRTypeNode, b: IRTypeNode) -> bool {
+        todo!();
+    }
+
+    fn type_check_registers(&mut self, a: u32, b: u32) -> bool {
+        todo!();
+    }
+
+    fn assign_var(&mut self, primary_token: u32, lhs: u32, rhs: u32) {
+        self.emit_node(IRNode {
+            primary_token,
+            node_type: IRNodeType::Assign,
+            data1: lhs,
+            data2: rhs,
+            data3: 0,
+        });
+        let lhst = self.current_scope().vars.get(&lhs).unwrap().clone();
+        let rhst = self.current_scope().vars.get(&rhs).unwrap().clone();
+        self.type_check(lhst, rhst);
     }
 }
