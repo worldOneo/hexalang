@@ -148,8 +148,8 @@ fn lex_exact<'a>(
     return (t, Some(ot.emit_token(token)));
 }
 
-const FIRST_ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
-const ID_CHAR: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
+const FIRST_ID_CHAR: &str = "#@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+const ID_CHAR: &str = "@abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_";
 
 pub fn lex_identifier_value<'a>(ot: SourceReader<'a>) -> (SourceReader<'a>, Option<&'a [char]>) {
     let mut t;

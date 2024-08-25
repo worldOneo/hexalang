@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+mod bump;
+mod ir;
 mod parser;
 mod tokenizer;
 

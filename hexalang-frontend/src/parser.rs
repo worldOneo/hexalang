@@ -1,4 +1,7 @@
-use crate::tokenizer::{self, Token, TokenValue};
+use crate::{
+    bump,
+    tokenizer::{self, Token, TokenValue},
+};
 
 pub const NULL: u32 = 4294967295;
 
@@ -161,62 +164,22 @@ pub struct Message {
     pub context: MessageContext,
 }
 
-pub struct BumpStorage<T>
-where
-    T: Clone,
-{
-    data: Vec<T>,
-}
-
-impl<T> Default for BumpStorage<T>
-where
-    T: Clone,
-{
-    fn default() -> Self {
-        Self {
-            data: Default::default(),
-        }
-    }
-}
-
-impl<T> BumpStorage<T>
-where
-    T: Clone,
-{
-    pub fn allocate(&mut self, t: T) -> u32 {
-        self.data.push(t);
-        return (self.data.len() - 1) as u32;
-    }
-
-    pub fn receive(&mut self, ptr: u32) -> T {
-        return self.data[ptr as usize].clone();
-    }
-
-    pub fn allocate_or(&mut self, t: Option<T>, u: u32) -> u32 {
-        if let Some(t) = t {
-            self.allocate(t)
-        } else {
-            u
-        }
-    }
-}
-
 pub struct Tree<'a> {
-    pub identifiers: BumpStorage<Identifier>,
-    pub signatures: BumpStorage<FunctionSignature>,
-    pub typed_identifier: BumpStorage<TypedIdentifier>,
-    pub assign: BumpStorage<Assign>,
-    pub integers: BumpStorage<u64>,
-    pub float: BumpStorage<f64>,
-    pub block: BumpStorage<Vec<FunctionalNode>>,
+    pub identifiers: bump::Storage<Identifier>,
+    pub signatures: bump::Storage<FunctionSignature>,
+    pub typed_identifier: bump::Storage<TypedIdentifier>,
+    pub assign: bump::Storage<Assign>,
+    pub integers: bump::Storage<u64>,
+    pub float: bump::Storage<f64>,
+    pub block: bump::Storage<Vec<FunctionalNode>>,
 
-    pub type_nodes: BumpStorage<TypeNode>,
-    pub functional_nodes: BumpStorage<FunctionalNode>,
+    pub type_nodes: bump::Storage<TypeNode>,
+    pub functional_nodes: bump::Storage<FunctionalNode>,
 
     pub messages: Vec<Message>,
     used: bool,
 
-    source: tokenizer::SourceReader<'a>,
+    pub source: tokenizer::SourceReader<'a>,
     tokens: Vec<tokenizer::Token>,
 }
 
@@ -256,15 +219,15 @@ impl<'source> Tree<'source> {
         Self {
             tokens,
             source,
-            identifiers: BumpStorage::default(),
-            signatures: BumpStorage::default(),
-            typed_identifier: BumpStorage::default(),
-            assign: BumpStorage::default(),
-            integers: BumpStorage::default(),
-            float: BumpStorage::default(),
-            block: BumpStorage::default(),
-            type_nodes: BumpStorage::default(),
-            functional_nodes: BumpStorage::default(),
+            identifiers: bump::Storage::default(),
+            signatures: bump::Storage::default(),
+            typed_identifier: bump::Storage::default(),
+            assign: bump::Storage::default(),
+            integers: bump::Storage::default(),
+            float: bump::Storage::default(),
+            block: bump::Storage::default(),
+            type_nodes: bump::Storage::default(),
+            functional_nodes: bump::Storage::default(),
             messages: vec![],
             used: false,
         }
