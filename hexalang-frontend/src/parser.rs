@@ -12,6 +12,7 @@ pub enum FunctionalNodeType {
     ValAssign,
     VarAssign,
     Type,
+    Identifier,
     If,
     Else,
     For,
@@ -540,7 +541,7 @@ impl<'source> Tree<'source> {
                     }),
                     data2: NULL,
                     additional_data: 0,
-                    node_type: FunctionalNodeType::Fn,
+                    node_type: FunctionalNodeType::Identifier,
                 }),
             )
         } else {

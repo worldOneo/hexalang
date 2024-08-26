@@ -86,7 +86,7 @@ impl Compiler {
         }
     }
 
-    fn nonetype(&mut self, primary_token: u32) -> IRTypeNode {
+    fn no_type(&mut self, primary_token: u32) -> IRTypeNode {
         IRTypeNode {
             primary_token,
             node_type: IRTypeNodeType::Unkown,
@@ -104,7 +104,7 @@ impl Compiler {
                 let type_node = if typed_id.type_node != parser::NULL {
                     self.type_to_ir(&tree.type_nodes.receive(typed_id.type_node), tree)
                 } else {
-                    self.nonetype(typed_id.primary_token)
+                    self.no_type(typed_id.primary_token)
                 };
                 let result =
                     self.eval(&type_node, &tree.functional_nodes.receive(line.data2), tree);
@@ -128,6 +128,7 @@ impl Compiler {
             parser::FunctionalNodeType::String => todo!(),
             parser::FunctionalNodeType::Block => todo!(),
             parser::FunctionalNodeType::MemberAccess => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -152,7 +153,7 @@ impl Compiler {
                     data2: rhs_register.register,
                     data3: expression.additional_data as u64,
                 });
-                self.type_check_registers(lhs_result.register, rhs_register.register);
+                self.implicit_register_cast(lhs_result.register, rhs_register.register);
                 return IRResult {
                     expression_type: Some(expected_type.clone()),
                     register,
@@ -184,6 +185,19 @@ impl Compiler {
             parser::FunctionalNodeType::String => todo!(),
             parser::FunctionalNodeType::Block => todo!(),
             parser::FunctionalNodeType::MemberAccess => todo!(),
+            parser::FunctionalNodeType::Identifier => {
+                let source = tree.source.set_offset(expression.primary_token);
+                let (_, data) = tokenizer::lex_identifier_value(source);
+                let name: String = data.unwrap().iter().collect();
+                let reg = self.current_scope().renames.get(&name).cloned();
+                if let Some(reg) = reg {
+                    return IRResult {
+                        expression_type: self.current_scope().vars.get(&reg).cloned(),
+                        register: reg,
+                    };
+                }
+                unreachable!()
+            }
             _ => unreachable!(),
         }
     }
@@ -215,8 +229,10 @@ impl Compiler {
         todo!();
     }
 
-    fn type_check_registers(&mut self, a: u32, b: u32) -> bool {
-        todo!();
+    fn implicit_register_cast(&mut self, a: u32, b: u32) -> bool {
+        let lhst = self.current_scope().vars.get(&a).unwrap().clone();
+        let rhst = self.current_scope().vars.get(&b).unwrap().clone();
+        return self.type_check(lhst, rhst);
     }
 
     fn assign_var(&mut self, primary_token: u32, lhs: u32, rhs: u32) {
@@ -227,8 +243,6 @@ impl Compiler {
             data2: rhs,
             data3: 0,
         });
-        let lhst = self.current_scope().vars.get(&lhs).unwrap().clone();
-        let rhst = self.current_scope().vars.get(&rhs).unwrap().clone();
-        self.type_check(lhst, rhst);
+        self.implicit_register_cast(lhs, rhs);
     }
 }
