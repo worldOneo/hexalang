@@ -94,6 +94,8 @@ pub enum TypeNodeType {
     Alias,
     Array,
     Struct,
+    Tuple,
+    Enum,
 }
 
 #[derive(Clone)]

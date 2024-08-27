@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 mod bump;
+mod codegen;
 mod ir;
 mod parser;
 mod tokenizer;

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::{bump, parser, tokenizer};
 
-#[derive(Debug, Clone)]
-pub enum IRTypeNodeType {
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeNodeType {
     Uint64,
     Uint32,
     Uint16,
@@ -19,13 +19,17 @@ pub enum IRTypeNodeType {
     Bool,
     Array,
     Struct,
+    Enum,
+    Tuple,
     Unkown,
+    Alias,
+    Type,
 }
 
 #[derive(Debug, Clone)]
-pub struct IRTypeNode {
+pub struct TypeNode {
     primary_token: u32,
-    node_type: IRTypeNodeType,
+    node_type: TypeNodeType,
     data1: u32,
     data2: u32,
 }
@@ -37,6 +41,7 @@ pub enum IRNodeType {
     If,
     For,
     ConstLoadU64,
+    LoadMember,
 }
 
 #[derive(Debug, Clone)]
@@ -54,10 +59,12 @@ struct Function {
 
 struct Scope {
     renames: HashMap<String, u32>,
-    vars: HashMap<u32, IRTypeNode>,
+    vars: HashMap<u32, TypeNode>,
+    type_vars: HashMap<String, TypeNode>,
 }
 
 struct Compiler {
+    type_nodes: bump::Storage<TypeNode>,
     blocks: bump::Storage<Vec<IRNode>>,
     scopes: Vec<Scope>,
     code_scopes: Vec<Vec<IRNode>>,
@@ -66,8 +73,8 @@ struct Compiler {
     functions: Function,
 }
 
-struct IRResult {
-    expression_type: Option<IRTypeNode>,
+struct TypedRegister {
+    expression_type: Option<TypeNode>,
     register: u32,
 }
 
@@ -78,7 +85,7 @@ impl Compiler {
         }
     }
 
-    fn type_to_ir(&mut self, node: &parser::TypeNode, tree: &parser::Tree) -> IRTypeNode {
+    fn type_to_ir(&mut self, node: &parser::TypeNode, tree: &parser::Tree) -> TypeNode {
         match node.node_type {
             parser::TypeNodeType::Alias => todo!(),
             parser::TypeNodeType::Array => todo!(),
@@ -86,12 +93,60 @@ impl Compiler {
         }
     }
 
-    fn no_type(&mut self, primary_token: u32) -> IRTypeNode {
-        IRTypeNode {
+    fn no_type(&mut self, primary_token: u32) -> TypeNode {
+        TypeNode {
             primary_token,
-            node_type: IRTypeNodeType::Unkown,
+            node_type: TypeNodeType::Unkown,
             data1: 0,
             data2: 0,
+        }
+    }
+
+    fn lex_identifier(&mut self, token: u32, tree: &parser::Tree) -> String {
+        let source = tree.source.set_offset(token);
+        let (_, data) = tokenizer::lex_identifier_value(source);
+        data.expect("Identifier expected").iter().collect()
+    }
+
+    fn infere_unordered_type(
+        &mut self,
+        statement: &parser::FunctionalNode,
+        tree: &parser::Tree,
+    ) -> TypeNode {
+        match &statement.node_type {
+            parser::FunctionalNodeType::Fn => todo!(),
+            parser::FunctionalNodeType::Type => {
+                let translated_type =
+                    self.type_to_ir(&tree.type_nodes.receive(statement.data1), tree);
+                TypeNode {
+                    primary_token: statement.primary_token,
+                    data1: self.type_nodes.allocate(translated_type),
+                    data2: 0,
+                    node_type: TypeNodeType::Type,
+                }
+            }
+            parser::FunctionalNodeType::Int => todo!(),
+            parser::FunctionalNodeType::Float => todo!(),
+            parser::FunctionalNodeType::Identifier => TypeNode {
+                primary_token: statement.primary_token,
+                data1: 0,
+                data2: 0,
+                node_type: TypeNodeType::Alias,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn unordered_scope_scan(&mut self, code: Vec<parser::FunctionalNode>, tree: &parser::Tree) {
+        for statment in code {
+            match &statment.node_type {
+                parser::FunctionalNodeType::ValAssign => {
+                    let lhs = tree.typed_identifier.receive(statment.data1);
+                    let rhs = tree.functional_nodes.receive(statment.data2);
+                    let ty = self.infere_unordered_type(&rhs, tree);
+                }
+                _ => panic!("Only val assign allowed in global scope"),
+            }
         }
     }
 
@@ -108,9 +163,7 @@ impl Compiler {
                 };
                 let result =
                     self.eval(&type_node, &tree.functional_nodes.receive(line.data2), tree);
-                let source = tree.source.set_offset(typed_id.primary_token);
-                let (_, name) = tokenizer::lex_identifier_value(source);
-                let name = name.unwrap().iter().collect();
+                let name = self.lex_identifier(typed_id.primary_token, tree);
                 let register = self.create_rename(&name);
                 self.create_var(register, type_node);
                 self.assign_var(line.primary_token, register, result.register);
@@ -134,10 +187,10 @@ impl Compiler {
 
     fn eval(
         &mut self,
-        expected_type: &IRTypeNode,
+        expected_type: &TypeNode,
         expression: &parser::FunctionalNode,
         tree: &parser::Tree,
-    ) -> IRResult {
+    ) -> TypedRegister {
         match &expression.node_type {
             parser::FunctionalNodeType::Fn => todo!(),
             parser::FunctionalNodeType::BiOp => {
@@ -154,7 +207,7 @@ impl Compiler {
                     data3: expression.additional_data as u64,
                 });
                 self.implicit_register_cast(lhs_result.register, rhs_register.register);
-                return IRResult {
+                return TypedRegister {
                     expression_type: Some(expected_type.clone()),
                     register,
                 };
@@ -171,10 +224,10 @@ impl Compiler {
                     data2: 0,
                     data3: intval,
                 });
-                return IRResult {
-                    expression_type: Some(IRTypeNode {
+                return TypedRegister {
+                    expression_type: Some(TypeNode {
                         primary_token: expression.primary_token,
-                        node_type: IRTypeNodeType::ComptimeInt,
+                        node_type: TypeNodeType::ComptimeInt,
                         data1: 0,
                         data2: 0,
                     }),
@@ -184,19 +237,45 @@ impl Compiler {
             parser::FunctionalNodeType::Float => todo!(),
             parser::FunctionalNodeType::String => todo!(),
             parser::FunctionalNodeType::Block => todo!(),
-            parser::FunctionalNodeType::MemberAccess => todo!(),
+            parser::FunctionalNodeType::MemberAccess => {
+                let lhs = tree.functional_nodes.receive(expression.data1);
+                let notype = self.no_type(expression.primary_token);
+                let result = self.eval(&notype, &lhs, tree);
+                let rhs = tree.functional_nodes.receive(expression.data2);
+                if result.expression_type.is_none() {
+                    unreachable!()
+                }
+                self.compile_member_access(expected_type, result, &rhs, tree)
+            }
             parser::FunctionalNodeType::Identifier => {
-                let source = tree.source.set_offset(expression.primary_token);
-                let (_, data) = tokenizer::lex_identifier_value(source);
-                let name: String = data.unwrap().iter().collect();
+                let name = self.lex_identifier(expression.primary_token, tree);
                 let reg = self.current_scope().renames.get(&name).cloned();
                 if let Some(reg) = reg {
-                    return IRResult {
+                    return TypedRegister {
                         expression_type: self.current_scope().vars.get(&reg).cloned(),
                         register: reg,
                     };
                 }
                 unreachable!()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn compile_member_access(
+        &mut self,
+        expected_type: &TypeNode,
+        lhs: TypedRegister,
+        rhs: &parser::FunctionalNode,
+        tree: &parser::Tree,
+    ) -> TypedRegister {
+        let lhs_type = lhs.expression_type.unwrap();
+
+        match rhs.node_type {
+            parser::FunctionalNodeType::Identifier => {
+                if lhs_type.node_type != TypeNodeType::Struct {
+                    panic!("Not struct accessed")
+                }
             }
             _ => unreachable!(),
         }
@@ -221,11 +300,29 @@ impl Compiler {
         return register;
     }
 
-    fn create_var(&mut self, register: u32, ty: IRTypeNode) {
+    fn get_rename(&mut self, name: &String) -> Option<u32> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(reg) = scope.renames.get(name) {
+                return Some(*reg);
+            }
+        }
+        return None;
+    }
+
+    fn get_type(&mut self, reg: u32) -> Option<TypeNode> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(t) = scope.vars.get(&reg) {
+                return Some(t.clone());
+            }
+        }
+        return None;
+    }
+
+    fn create_var(&mut self, register: u32, ty: TypeNode) {
         self.current_scope().vars.insert(register, ty);
     }
 
-    fn type_check(&mut self, a: IRTypeNode, b: IRTypeNode) -> bool {
+    fn type_check(&mut self, a: TypeNode, b: TypeNode) -> bool {
         todo!();
     }
 
