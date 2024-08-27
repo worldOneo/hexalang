@@ -37,7 +37,9 @@ pub struct TypeNode {
 #[derive(Debug, Clone)]
 pub enum IRNodeType {
     BiOp,
+    Init,
     Assign,
+    GlobalAssign,
     If,
     For,
     ConstLoadU64,
@@ -80,6 +82,7 @@ struct TypedRegister {
 
 impl Compiler {
     pub fn run(&mut self, code: Vec<parser::FunctionalNode>, tree: &parser::Tree) {
+        self.unordered_scope_scan(&code, tree);
         for inst in &code {
             self.run_line(inst, tree)
         }
@@ -147,19 +150,35 @@ impl Compiler {
         }
     }
 
-    fn unordered_scope_scan(&mut self, code: Vec<parser::FunctionalNode>, tree: &parser::Tree) {
-        for statment in code {
-            match &statment.node_type {
+    fn unordered_scope_scan(&mut self, code: &Vec<parser::FunctionalNode>, tree: &parser::Tree) {
+        let mut regs = vec![];
+        for statement in code {
+            match &statement.node_type {
                 parser::FunctionalNodeType::ValAssign => {
-                    let lhs = tree.typed_identifier.receive(statment.data1);
-                    let rhs = tree.functional_nodes.receive(statment.data2);
+                    let lhs = tree.typed_identifier.receive(statement.data1);
+                    let rhs = tree.functional_nodes.receive(statement.data2);
                     let ty = self.infere_unordered_type(&rhs, tree);
                     let name = self.lex_identifier(lhs.primary_token, tree);
                     let reg = self.create_rename(&name);
-                    self.create_var(reg, ty);
+                    regs.push(reg);
+                    self.create_var(lhs.primary_token, reg, ty);
                 }
                 _ => panic!("Only val assign allowed in global scope"),
             }
+        }
+
+        for (statement, reg) in code.iter().zip(regs.iter()) {
+            let lhs = tree.typed_identifier.receive(statement.data1);
+            let rhs = tree.functional_nodes.receive(statement.data2);
+            let nt = &self.no_type(lhs.primary_token);
+            let r = self.eval(nt, &rhs, tree);
+            self.emit_node(IRNode {
+                primary_token: lhs.primary_token,
+                node_type: IRNodeType::GlobalAssign,
+                data1: *reg,
+                data2: r.register,
+                data3: 0,
+            })
         }
     }
 
@@ -178,7 +197,7 @@ impl Compiler {
                     self.eval(&type_node, &tree.functional_nodes.receive(line.data2), tree);
                 let name = self.lex_identifier(typed_id.primary_token, tree);
                 let register = self.create_rename(&name);
-                self.create_var(register, type_node);
+                self.create_var(typed_id.primary_token, register, type_node);
                 self.assign_var(line.primary_token, register, result.register);
             }
             parser::FunctionalNodeType::Type => todo!(),
@@ -331,7 +350,15 @@ impl Compiler {
         return None;
     }
 
-    fn create_var(&mut self, register: u32, ty: TypeNode) {
+    fn create_var(&mut self, primary_token: u32, register: u32, ty: TypeNode) {
+        let tyidx = self.type_nodes.allocate(ty.clone());
+        self.emit_node(IRNode {
+            primary_token,
+            node_type: IRNodeType::Init,
+            data1: register,
+            data2: tyidx,
+            data3: 0,
+        });
         self.current_scope().vars.insert(register, ty);
     }
 
