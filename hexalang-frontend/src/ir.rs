@@ -125,8 +125,18 @@ impl Compiler {
                     node_type: TypeNodeType::Type,
                 }
             }
-            parser::FunctionalNodeType::Int => todo!(),
-            parser::FunctionalNodeType::Float => todo!(),
+            parser::FunctionalNodeType::Int => TypeNode {
+                primary_token: statement.primary_token,
+                data1: 0,
+                data2: 0,
+                node_type: TypeNodeType::ComptimeInt,
+            },
+            parser::FunctionalNodeType::Float => TypeNode {
+                primary_token: statement.primary_token,
+                data1: 0,
+                data2: 0,
+                node_type: TypeNodeType::ComptimeFloat,
+            },
             parser::FunctionalNodeType::Identifier => TypeNode {
                 primary_token: statement.primary_token,
                 data1: 0,
@@ -144,6 +154,9 @@ impl Compiler {
                     let lhs = tree.typed_identifier.receive(statment.data1);
                     let rhs = tree.functional_nodes.receive(statment.data2);
                     let ty = self.infere_unordered_type(&rhs, tree);
+                    let name = self.lex_identifier(lhs.primary_token, tree);
+                    let reg = self.create_rename(&name);
+                    self.create_var(reg, ty);
                 }
                 _ => panic!("Only val assign allowed in global scope"),
             }
