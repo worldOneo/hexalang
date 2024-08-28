@@ -39,7 +39,6 @@ pub enum IRNodeType {
     BiOp,
     Init,
     Assign,
-    GlobalAssign,
     If,
     For,
     ConstLoadU64,
@@ -94,6 +93,7 @@ impl Compiler {
             parser::TypeNodeType::Array => todo!(),
             parser::TypeNodeType::Struct => todo!(),
         }
+        todo!()
     }
 
     fn no_type(&mut self, primary_token: u32) -> TypeNode {
@@ -174,7 +174,7 @@ impl Compiler {
             let r = self.eval(nt, &rhs, tree);
             self.emit_node(IRNode {
                 primary_token: lhs.primary_token,
-                node_type: IRNodeType::GlobalAssign,
+                node_type: IRNodeType::Assign,
                 data1: *reg,
                 data2: r.register,
                 data3: 0,

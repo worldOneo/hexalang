@@ -25,6 +25,7 @@ pub enum FunctionalNodeType {
     String,
     Block,
     MemberAccess,
+    Call,
 }
 
 #[derive(Clone)]
@@ -175,6 +176,7 @@ pub struct Tree<'a> {
     pub integers: bump::Storage<u64>,
     pub float: bump::Storage<f64>,
     pub block: bump::Storage<Vec<FunctionalNode>>,
+    pub call_args: bump::Storage<Vec<FunctionalNode>>,
 
     pub type_nodes: bump::Storage<TypeNode>,
     pub functional_nodes: bump::Storage<FunctionalNode>,
@@ -231,6 +233,7 @@ impl<'source> Tree<'source> {
             block: bump::Storage::default(),
             type_nodes: bump::Storage::default(),
             functional_nodes: bump::Storage::default(),
+            call_args: bump::Storage::default(),
             messages: vec![],
             used: false,
         }
@@ -441,9 +444,66 @@ impl<'source> Tree<'source> {
 
         return match t.value() {
             TokenValue::Dot => self.parse_dot_access(lhs, weight, tokensource),
-            // TokenValue::ParenOpen => {}
+            TokenValue::ParenOpen => self.parse_fn_call(lhs, weight, tokensource),
             _ => (source, None),
         };
+    }
+
+    fn parse_fn_call<'a>(
+        &mut self,
+        lhs: FunctionalNode,
+        weight: u32,
+        mut source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let primary_token = source.offset();
+        let mut args = vec![];
+        loop {
+            let (nsource, t) = Self::next(source.clone());
+            if t.is_some_and(|x| {
+                [TokenValue::ParenClose, TokenValue::PhantomParenClose].contains(&x.value())
+            }) {
+                source = nsource;
+                break;
+            }
+
+            let (nsource, t) = self.parse_expression(0, source.clone());
+            let mut noexpr = false;
+            if let Some(v) = t {
+                args.push(v);
+                source = nsource;
+            } else {
+                noexpr = true;
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::ValueExpected,
+                    MessageContext::Functional(FunctionalNodeType::Call),
+                    source.offset(),
+                );
+            }
+
+            let (nsource, t) = Self::expect(source.clone(), TokenValue::Comma);
+            if t.is_none() {
+                self.emit_message(
+                    MessageLevel::Error,
+                    MessageType::CommaExpected,
+                    MessageContext::Functional(FunctionalNodeType::Call),
+                    source.offset(),
+                );
+                if noexpr {
+                    (source, _) = Self::next(source.clone());
+                }
+            } else {
+                source = nsource;
+            }
+        }
+        let node = FunctionalNode {
+            primary_token,
+            data1: self.functional_nodes.allocate(lhs),
+            data2: self.call_args.allocate(args),
+            node_type: FunctionalNodeType::Call,
+            additional_data: 0,
+        };
+        return self.parse_extension_max_weight(node, weight, source);
     }
 
     fn parse_literal<'a>(
