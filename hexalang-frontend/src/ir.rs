@@ -24,6 +24,7 @@ pub enum TypeNodeType {
     Unkown,
     Alias,
     Type,
+    Function,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +65,12 @@ struct Scope {
     type_vars: HashMap<String, TypeNode>,
 }
 
+#[derive(Clone)]
+struct FunctionType {
+    args: Vec<TypeNode>,
+    ret: TypeNode,
+}
+
 struct Compiler {
     type_nodes: bump::Storage<TypeNode>,
     blocks: bump::Storage<Vec<IRNode>>,
@@ -72,6 +79,7 @@ struct Compiler {
     output: Vec<IRNode>,
     counter: u32,
     functions: Function,
+    function_signature_types: bump::Storage<FunctionType>,
 }
 
 struct TypedRegister {
@@ -93,7 +101,6 @@ impl Compiler {
             parser::TypeNodeType::Array => todo!(),
             parser::TypeNodeType::Struct => todo!(),
         }
-        todo!()
     }
 
     fn no_type(&mut self, primary_token: u32) -> TypeNode {
@@ -117,7 +124,27 @@ impl Compiler {
         tree: &parser::Tree,
     ) -> TypeNode {
         match &statement.node_type {
-            parser::FunctionalNodeType::Fn => todo!(),
+            parser::FunctionalNodeType::Fn => {
+                let signature = tree.signatures.receive(statement.data1);
+                let ret = if signature.return_type == parser::NULL {
+                    self.type_to_ir(&tree.type_nodes.receive(signature.return_type), tree)
+                } else {
+                    self.no_type(signature.primary_token)
+                };
+                let args = signature.parameters;
+                let mut targs = vec![];
+                for arg in args {
+                    targs.push(self.type_to_ir(&tree.type_nodes.receive(arg.type_node), tree));
+                }
+                TypeNode {
+                    primary_token: statement.primary_token,
+                    node_type: TypeNodeType::Function,
+                    data1: self
+                        .function_signature_types
+                        .allocate(FunctionType { args: targs, ret }),
+                    data2: 0,
+                }
+            }
             parser::FunctionalNodeType::Type => {
                 let translated_type =
                     self.type_to_ir(&tree.type_nodes.receive(statement.data1), tree);
@@ -184,7 +211,6 @@ impl Compiler {
 
     fn run_line(&mut self, line: &parser::FunctionalNode, tree: &parser::Tree) {
         match &line.node_type {
-            parser::FunctionalNodeType::Fn => todo!(),
             parser::FunctionalNodeType::Assign => todo!(),
             parser::FunctionalNodeType::ValAssign | parser::FunctionalNodeType::VarAssign => {
                 let typed_id = tree.typed_identifier.receive(line.data1);
@@ -205,12 +231,6 @@ impl Compiler {
             parser::FunctionalNodeType::Else => todo!(),
             parser::FunctionalNodeType::For => todo!(),
             parser::FunctionalNodeType::Process => todo!(),
-            parser::FunctionalNodeType::BiOp => todo!(),
-            parser::FunctionalNodeType::UnOp => todo!(),
-            parser::FunctionalNodeType::Pipe => todo!(),
-            parser::FunctionalNodeType::Int => todo!(),
-            parser::FunctionalNodeType::Float => todo!(),
-            parser::FunctionalNodeType::String => todo!(),
             parser::FunctionalNodeType::Block => todo!(),
             parser::FunctionalNodeType::MemberAccess => todo!(),
             _ => unreachable!(),
