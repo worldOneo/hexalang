@@ -343,6 +343,27 @@ impl Compiler {
                 if lhs_type.node_type != TypeNodeType::Struct {
                     panic!("Not struct accessed")
                 }
+                let ty = tree.struct_types.receive(lhs_type.data1);
+                let member = self.lex_identifier(rhs.primary_token, tree);
+                let entry = ty.fields.get(&member);
+                if entry.is_none() {
+                    panic!("No such member: {}", member)
+                }
+                let member_reg = self.new_register();
+                let ty = entry.cloned().unwrap();
+                let ty = self.type_to_ir(&tree.type_nodes.receive(ty), tree);
+                self.create_var(rhs.primary_token, member_reg, ty.clone());
+                self.emit_node(IRNode {
+                    primary_token: rhs.primary_token,
+                    node_type: IRNodeType::LoadMember,
+                    data1: member_reg,
+                    data2: lhs.register,
+                    data3: 0,
+                });
+                TypedRegister {
+                    expression_type: Some(ty),
+                    register: member_reg,
+                }
             }
             _ => unreachable!(),
         }

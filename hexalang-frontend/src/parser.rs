@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     bump,
     tokenizer::{self, Token, TokenValue},
@@ -168,6 +170,11 @@ pub struct Message {
     pub context: MessageContext,
 }
 
+#[derive(Debug, Clone)]
+pub struct StructType {
+    pub fields: HashMap<String, u32>,
+}
+
 pub struct Tree<'a> {
     pub identifiers: bump::Storage<Identifier>,
     pub signatures: bump::Storage<FunctionSignature>,
@@ -177,6 +184,7 @@ pub struct Tree<'a> {
     pub float: bump::Storage<f64>,
     pub block: bump::Storage<Vec<FunctionalNode>>,
     pub call_args: bump::Storage<Vec<FunctionalNode>>,
+    pub struct_types: bump::Storage<StructType>,
 
     pub type_nodes: bump::Storage<TypeNode>,
     pub functional_nodes: bump::Storage<FunctionalNode>,
