@@ -211,7 +211,22 @@ impl Compiler {
 
     fn run_line(&mut self, line: &parser::FunctionalNode, tree: &parser::Tree) {
         match &line.node_type {
-            parser::FunctionalNodeType::Assign => todo!(),
+            parser::FunctionalNodeType::Assign => {
+                let name = self.lex_identifier(line.primary_token, tree);
+                let reg = self.get_rename(&name);
+                if let Some(reg) = reg {
+                    let ty = self.get_type(reg).unwrap();
+                    let rhs = self.eval(&ty, &tree.functional_nodes.receive(line.data1), tree);
+                    self.implicit_register_cast(reg, rhs.register);
+                    self.emit_node(IRNode {
+                        primary_token: line.primary_token,
+                        node_type: IRNodeType::Assign,
+                        data1: reg,
+                        data2: rhs.register,
+                        data3: 0,
+                    });
+                }
+            }
             parser::FunctionalNodeType::ValAssign | parser::FunctionalNodeType::VarAssign => {
                 let typed_id = tree.typed_identifier.receive(line.data1);
                 let type_node = if typed_id.type_node != parser::NULL {
