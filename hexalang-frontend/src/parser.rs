@@ -28,9 +28,10 @@ pub enum FunctionalNodeType {
     Block,
     MemberAccess,
     Call,
+    Struct,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum UnOp {
     Minus = 0,
     Not = 1,
@@ -83,7 +84,7 @@ impl From<u16> for BiOp {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FunctionalNode {
     pub primary_token: u32,
     pub data1: u32,
@@ -101,7 +102,7 @@ pub enum TypeNodeType {
     Enum,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TypeNode {
     pub primary_token: u32,
     pub data1: u32,
@@ -110,25 +111,25 @@ pub struct TypeNode {
     pub node_type: TypeNodeType,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct FunctionSignature {
     pub primary_token: u32,
     pub parameters: Vec<TypedIdentifier>,
     pub return_type: u32,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Identifier {
     pub primary_token: u32,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TypedIdentifier {
     pub primary_token: u32,
     pub type_node: u32,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Assign {
     pub identifier: u32,
     pub value: FunctionalNode,
@@ -242,6 +243,7 @@ impl<'source> Tree<'source> {
             type_nodes: bump::Storage::default(),
             functional_nodes: bump::Storage::default(),
             call_args: bump::Storage::default(),
+            struct_types: bump::Storage::default(),
             messages: vec![],
             used: false,
         }
@@ -1103,6 +1105,39 @@ impl<'source> Tree<'source> {
         }
         fnode.data2 = self.functional_nodes.allocate_or(statement, NULL);
         return (nsource, Some(fnode));
+    }
+
+    fn parse_struct<'a>(
+        &mut self,
+        source: SourceReader<'a>,
+    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+        let (nsource, t) = Self::expect(source.clone(), TokenValue::Struct);
+        if t.is_none() {
+            return (source, None);
+        }
+        let (nsource, bropen) = Self::expect(nsource, TokenValue::BraceOpen);
+        let mut struct_ty = StructType {
+            fields: HashMap::default(),
+        };
+        if bropen.is_none() {
+            self.emit_message(
+                MessageLevel::Error,
+                MessageType::BraceExpected,
+                MessageContext::Functional(FunctionalNodeType::Struct),
+                nsource.offset(),
+            );
+            return (
+                nsource.clone(),
+                Some(FunctionalNode {
+                    primary_token: nsource.offset(),
+                    node_type: FunctionalNodeType::Struct,
+                    data1: self.struct_types.allocate(struct_ty),
+                    data2: NULL,
+                    additional_data: 0,
+                }),
+            );
+        }
+        todo!();
     }
 
     fn emit_message(
