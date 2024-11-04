@@ -1,9 +1,12 @@
+#![feature(type_alias_impl_trait)]
+
 use std::rc::Rc;
 
 mod bump;
 mod codegen;
 mod ir;
 mod parser;
+mod parser2;
 mod tokenizer;
 
 fn main() {

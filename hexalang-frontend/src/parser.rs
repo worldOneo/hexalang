@@ -7,8 +7,9 @@ use crate::{
 
 pub const NULL: u32 = 4294967295;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Copy)]
 pub enum FunctionalNodeType {
+    #[default]
     Fn,
     Assign,
     ValAssign,
@@ -84,7 +85,7 @@ impl From<u16> for BiOp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FunctionalNode {
     pub primary_token: u32,
     pub data1: u32,
@@ -93,7 +94,7 @@ pub struct FunctionalNode {
     pub node_type: FunctionalNodeType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum TypeNodeType {
     Alias,
     Array,
@@ -135,15 +136,16 @@ pub struct Assign {
     pub value: FunctionalNode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageLevel {
+    NOP,
     Debug,
     Info,
     Warning,
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageType {
     TypeExpected,
     ValueExpected,
@@ -155,20 +157,32 @@ pub enum MessageType {
     EQExpected,
     Literal,
     IdentifierExpected,
+    KWExpected,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageContext {
     Type(TypeNodeType),
     Functional(FunctionalNodeType),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Message {
     pub token: u32,
     pub level: MessageLevel,
     pub message: MessageType,
     pub context: MessageContext,
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            token: 0,
+            message: MessageType::IdentifierExpected,
+            level: MessageLevel::NOP,
+            context: MessageContext::Functional(FunctionalNodeType::Assign),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +242,61 @@ impl<'a> SourceReader<'a> {
     }
 }
 
+enum ParseResult<'a, T> {
+    Ok {
+        value: T,
+        source: SourceReader<'a>,
+    },
+    Err {
+        msg: Message,
+        source: SourceReader<'a>,
+    },
+    Deep {
+        msg: Message,
+    },
+    NoMatch {
+        source: SourceReader<'a>,
+    },
+}
+
+impl<'a, T> ParseResult<'a, T> {
+    fn escelate(self) -> Self {
+        match self {
+            ParseResult::Err { msg, .. } => ParseResult::Deep { msg },
+            deep => deep,
+        }
+    }
+
+    fn map_ok(self, f: &dyn Fn(SourceReader<'a>, T) -> Self) -> Self {
+        match self {
+            ParseResult::Ok { value, source } => f(source, value),
+            err => err,
+        }
+    }
+
+    fn morph<N>(self) -> ParseResult<'a, N> {
+        match self {
+            ParseResult::Ok { .. } => panic!(),
+            ParseResult::Err { msg, source } => ParseResult::Err { msg, source },
+            ParseResult::Deep { msg } => ParseResult::Deep { msg },
+            ParseResult::NoMatch { source } => ParseResult::NoMatch { source },
+        }
+    }
+
+    fn err_no_match(self, msg: Message) -> ParseResult<'a, T> {
+        match self {
+            ParseResult::NoMatch { source } => return ParseResult::Err { msg, source },
+            _ => {}
+        }
+        return self;
+    }
+}
+
+trait TParserFn<'a, 'b, A>: FnOnce(&mut Tree<'a>, SourceReader<'b>) -> ParseResult<'b, A> {}
+
+type ParserFn<'a, 'b, A> = dyn Fn(&mut Tree<'a>, SourceReader<'b>) -> ParseResult<'b, A>;
+type IParserFn<'a, 'b, A> = impl FnOnce(&mut Tree<'a>, SourceReader<'b>) -> ParseResult<'b, A>;
+
 impl<'source> Tree<'source> {
     pub fn new(source: tokenizer::SourceReader<'source>, tokens: Vec<tokenizer::Token>) -> Self {
         Self {
@@ -272,25 +341,189 @@ impl<'source> Tree<'source> {
         return (source, None);
     }
 
-    fn expect<'a>(source: SourceReader<'a>, v: TokenValue) -> (SourceReader<'a>, Option<Token>) {
+    fn expect<'a>(source: SourceReader<'a>, v: TokenValue) -> ParseResult<'a, Token> {
         if let (nsource, Some(t)) = Self::next(source.clone()) {
             if t.value() == v {
-                return (nsource, Some(t));
+                return ParseResult::Ok {
+                    source: nsource,
+                    value: t,
+                };
             }
         }
-        return (source, None);
+        return ParseResult::NoMatch { source };
     }
 
-    fn expect_any<'a, const N: usize>(
-        source: SourceReader<'a>,
-        v: [TokenValue; N],
-    ) -> (SourceReader<'a>, Option<Token>) {
-        if let (nsource, Some(t)) = Self::next(source.clone()) {
-            if v.contains(&t.value()) {
-                return (nsource, Some(t));
+    fn parse_consecutive2<
+        'a: 'source,
+        A: 'a,
+        B: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, B>,
+    >(
+        parsers: (&'a FnA, &'a FnB),
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, (A, B)> {
+        |s, source| {
+            let (_1, _2) = parsers;
+            let (nsource, a) = match _1(s, source.clone()) {
+                ParseResult::Ok { source, value } => (source, value),
+                other => return other.morph(),
+            };
+            match parsers.1(s, nsource) {
+                ParseResult::Ok { source, value } => {
+                    return ParseResult::Ok {
+                        source,
+                        value: (a, value),
+                    }
+                }
+                other => return other.morph(),
             }
         }
-        return (source, None);
+    }
+
+    fn parse_consecutive3<
+        'a: 'source,
+        A: 'a,
+        B: 'a,
+        C: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, B>,
+        FnC: TParserFn<'source, 'a, C>,
+    >(
+        parsers: (FnA, FnB, FnC),
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, (A, B, C)> {
+        |s, source| {
+            let (_0, _1, _2) = parsers;
+            let (nsource, a) = match Self::parse_consecutive2((_0, _1))(s, source) {
+                ParseResult::Ok { source, value } => (source, value),
+                other => return other.morph(),
+            };
+            match _2(s, nsource) {
+                ParseResult::Ok { source, value } => {
+                    return ParseResult::Ok {
+                        source,
+                        value: (a.0, a.1, value),
+                    }
+                }
+                other => return other.morph(),
+            }
+        }
+    }
+
+    fn parse_consecutive4<
+        'a: 'source,
+        A: 'a,
+        B: 'a,
+        C: 'a,
+        D: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, B>,
+        FnC: TParserFn<'source, 'a, C>,
+        FnD: TParserFn<'source, 'a, D>,
+    >(
+        parsers: (FnA, FnB, FnC, FnD),
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, (A, B, C, D)> {
+        |s, source| {
+            let (nsource, a) =
+                match Self::parse_consecutive2((parsers.0, parsers.1))(s, source.clone()) {
+                    ParseResult::Ok { source, value } => (source, value),
+                    other => return other.morph(),
+                };
+            match Self::parse_consecutive2((parsers.2, parsers.3))(s, nsource) {
+                ParseResult::Ok { source, value } => ParseResult::Ok {
+                    source,
+                    value: (a.0, a.1, value.0, value.1),
+                },
+                other => return other.morph(),
+            }
+        }
+    }
+
+    fn parse_consecutive5<
+        'a: 'source,
+        A: 'a,
+        B: 'a,
+        C: 'a,
+        D: 'a,
+        E: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, B>,
+        FnC: TParserFn<'source, 'a, C>,
+        FnD: TParserFn<'source, 'a, D>,
+        FnE: TParserFn<'source, 'a, E>,
+    >(
+        parsers: (FnA, FnB, FnC, FnD, FnE),
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, (A, B, C, D, E)> {
+        |s, source| {
+            let (nsource, a) =
+                match Self::parse_consecutive3((parsers.0, parsers.1, parsers.2))(s, source) {
+                    ParseResult::Ok { source, value } => (source, value),
+                    other => return other.morph(),
+                };
+            match Self::parse_consecutive2((parsers.3, parsers.4))(s, nsource) {
+                ParseResult::Ok { source, value } => ParseResult::Ok {
+                    source,
+                    value: (a.0, a.1, a.2, value.0, value.1),
+                },
+                other => return other.morph(),
+            }
+        }
+    }
+
+    fn parse_either<
+        'a: 'source,
+        A: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, A>,
+    >(
+        either: FnA,
+        otherwise: FnB,
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, A> {
+        |s, source| {
+            let a = either(s, source.clone());
+            if let ParseResult::NoMatch { .. } = a {
+                return otherwise(s, source);
+            }
+            return a;
+        }
+    }
+
+    fn parser_repeat_if_follows<
+        'a: 'source,
+        A: 'a,
+        B: 'a,
+        FnA: TParserFn<'source, 'a, A>,
+        FnB: TParserFn<'source, 'a, B>,
+    >(
+        parser: &FnA,
+        if_follows: &FnB,
+    ) -> impl FnOnce(&mut Tree<'source>, SourceReader<'a>) -> ParseResult<'a, Vec<A>> {
+        |s, source| {
+            let mut parsed = vec![];
+            let mut nsource = source.clone();
+            loop {
+                let c = Self::parse_consecutive2((parser, if_follows))(s, nsource.clone());
+                match c {
+                    ParseResult::Ok { value, source } => {
+                        nsource = source;
+                        parsed.push(value.0);
+                        continue;
+                    }
+                    _ => {}
+                }
+                match parser(s, nsource.clone()) {
+                    ParseResult::Ok { value, source } => {
+                        nsource = source;
+                        parsed.push(value);
+                        break;
+                    }
+                    err => return err.morph(),
+                }
+            }
+            return ParseResult::Ok {
+                value: parsed,
+                source: nsource,
+            };
+        }
     }
 
     fn to_integer(chars: &[char]) -> Option<u64> {
@@ -594,7 +827,7 @@ impl<'source> Tree<'source> {
         &mut self,
         weight: u32,
         source: SourceReader<'a>,
-    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
+    ) -> ParseResult<'a, FunctionalNode> {
         let maybe_expr = if let (nsource, Some(v)) =
             self.parse_unary_prefixed(weight, source.clone())
         {
@@ -703,90 +936,44 @@ impl<'source> Tree<'source> {
         }
     }
 
-    fn parse_init<'a>(
-        &mut self,
-        source: SourceReader<'a>,
-    ) -> (SourceReader<'a>, Option<FunctionalNode>) {
-        let primary = source.offset();
-        let (source, t) = Self::next(source);
-        if let None = t {
-            return (source, None);
-        }
-        let t = t.unwrap();
-        let var = t.value() == TokenValue::Var;
-        let val = t.value() == TokenValue::Val;
-        if !var && !val {
-            return (source, None);
-        }
+    fn parse_init<'a>(&mut self, source: SourceReader<'a>) -> ParseResult<'a, FunctionalNode> {
+        let init = Self::parse_either(
+            Self::parse_consecutive3((
+                &|_, s| Self::expect(s, TokenValue::Identifier),
+                &|_, s| Self::expect(s, TokenValue::Val),
+                &|se, s| Self::parse_expression(se, 0, s),
+            )),
+            Self::parse_consecutive3((
+                &|_, s| Self::expect(s, TokenValue::Identifier),
+                &|_, s| Self::expect(s, TokenValue::Var),
+                &|se, s| Self::parse_expression(se, 0, s),
+            )),
+        );
 
-        let mut fnode = FunctionalNode {
-            primary_token: primary,
-            data1: NULL,
-            data2: NULL,
-            additional_data: 0,
-            node_type: if var {
-                FunctionalNodeType::VarAssign
-            } else {
-                FunctionalNodeType::ValAssign
-            },
-        };
-
-        let mut typed_identifier = TypedIdentifier {
-            primary_token: source.offset(),
-            type_node: NULL,
-        };
-
-        let (source, identifier) = Self::expect(source, TokenValue::Identifier);
-        if identifier.is_none() {
-            self.emit_message(
-                MessageLevel::Error,
-                MessageType::IdentifierExpected,
-                MessageContext::Functional(fnode.node_type.clone()),
-                source.offset(),
-            );
-        }
-
-        let (source, colon) = Self::expect(source, TokenValue::Colon);
-        if colon.is_some() {
-            let (source, _type) = self.parse_type(source.clone());
-            if let Some(tnode) = _type {
-                typed_identifier.type_node = self.type_nodes.allocate(tnode);
-            } else {
-                self.emit_message(
-                    MessageLevel::Error,
-                    MessageType::TypeExpected,
-                    MessageContext::Functional(fnode.node_type.clone()),
-                    source.offset(),
-                );
+        match init {
+            ParseResult::Ok {
+                value: (id, valvar, v),
+                source: nsource,
+            } => {
+                let nodeType = if valvar.value() == TokenValue::Val {
+                    FunctionalNodeType::ValAssign
+                } else {
+                    FunctionalNodeType::VarAssign
+                };
+                return ParseResult::Ok {
+                    value: FunctionalNode {
+                        primary_token: source.offset(),
+                        data1: self.identifiers.allocate(Identifier {
+                            primary_token: id.offset(),
+                        }),
+                        data2: self.functional_nodes.allocate(v),
+                        additional_data: 0,
+                        node_type: nodeType,
+                    },
+                    source,
+                };
             }
         }
-
-        fnode.data1 = self.typed_identifier.allocate(typed_identifier);
-
-        let (mut source, eq) = Self::expect(source, TokenValue::EQ);
-        if !eq.is_some() {
-            self.emit_message(
-                MessageLevel::Error,
-                MessageType::EQExpected,
-                MessageContext::Functional(fnode.node_type.clone()),
-                source.offset(),
-            );
-        }
-
-        let (nsource, expression) = self.parse_expression(0, source);
-        if let Some(expression) = expression {
-            fnode.data2 = self.functional_nodes.allocate(expression);
-        } else {
-            self.emit_message(
-                MessageLevel::Error,
-                MessageType::ValueExpected,
-                MessageContext::Functional(fnode.node_type.clone()),
-                nsource.offset(),
-            );
-        }
-        source = nsource;
-
-        return (source, Some(fnode));
     }
 
     fn parse_statement<'a>(
@@ -898,7 +1085,7 @@ impl<'source> Tree<'source> {
             node_type: FunctionalNodeType::If,
         };
         let (elsesource, elsetoken) = Self::expect(nsource.clone(), TokenValue::Else);
-        if let Some(_) = elsetoken {
+        if let Ok(_) = elsetoken {
             let (stmtsource, elsestatement) = self.parse_statement(elsesource.clone());
             if elsestatement.is_none() {
                 self.emit_message(

@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, rc::Rc};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenValue {
     Identifier,
     String,
@@ -39,6 +39,7 @@ pub enum TokenValue {
     Lor,
     Dot,
     Colon,
+    Semicolon,
     Comma,
     Not,
     ShiftL,
@@ -53,13 +54,20 @@ pub enum TokenValue {
     PhantomSquareClose,
     PhantomParenClose,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Token {
     start: u32,
     value: TokenValue,
 }
 
 impl Token {
+    pub fn empty() -> Self {
+        return Self {
+            start: 0,
+            value: TokenValue::And,
+        };
+    }
+
     pub fn value(&self) -> TokenValue {
         return self.value.clone();
     }
@@ -379,7 +387,8 @@ impl<'a> Iterator for TokenIterator<'a> {
                 &|r| lex_exact(r, "if", TokenValue::If),
                 &|r| lex_exact(r, "else", TokenValue::Else),
                 &|r| lex_exact(r, "for", TokenValue::For),
-                &|r| lex_exact(r, "val", TokenValue::Val),
+                &|r| lex_exact(r, "::", TokenValue::Val),
+                &|r| lex_exact(r, ":=", TokenValue::Var),
                 &|r| lex_exact(r, "generic", TokenValue::Generic),
                 &|r| lex_exact(r, "for", TokenValue::For),
                 &|r| lex_exact(r, "struct", TokenValue::Struct),
@@ -413,6 +422,7 @@ impl<'a> Iterator for TokenIterator<'a> {
                 &|r| lex_exact(r, ",", TokenValue::Comma),
                 &|r| lex_exact(r, ".", TokenValue::Dot),
                 &|r| lex_exact(r, ":", TokenValue::Colon),
+                &|r| lex_exact(r, ";", TokenValue::Semicolon),
                 &|r| lex_exact(r, "!", TokenValue::Not),
                 &lex_identifier,
                 &lex_string,
