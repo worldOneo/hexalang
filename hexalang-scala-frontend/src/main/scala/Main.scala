@@ -82,20 +82,26 @@ enum ParserResult[T] {
       case Ok(value, source) => throw IllegalStateException("Morphed Ok enum")
     }
   }
+
+  def mapOk[B](f: (T, Source) => (B, Source)): ParserResult[B] = this match {
+    case Ok(value, source) =>
+      val v = f(value, source)
+      return Ok(v._1, v._2)
+    case default => default.morph()
+  }
+
+  def mapOkUp[B](f: (T, Source) => ParserResult[B]): ParserResult[B] =
+    this match {
+      case Ok(value, source) => f(value, source)
+      case default           => default.morph()
+    }
 }
 
 def parseConsecutive2[A, B](a: Parser[A], b: Parser[B]): Parser[(A, B)] =
-  (arg: Source) => {
-    a(arg) match {
-      case ParserResult.Ok(valuea, sourcea) =>
-        b(sourcea) match {
-          case ParserResult.Ok(value, source) =>
-            ParserResult.Ok(value = (valuea, value), source = source)
-          case default => default.morph()
-        }
-      case default => default.morph()
-    }
-  }
+  (arg: Source) =>
+    a(arg).mapOkUp((valuea, sourcea) =>
+      b(sourcea).mapOk((v, s) => ((valuea, v), s))
+    )
 
 def parseConsecutive3[A, B, C](
     a: Parser[A],
@@ -103,18 +109,9 @@ def parseConsecutive3[A, B, C](
     c: Parser[C]
 ): Parser[(A, B, C)] =
   (arg: Source) =>
-    parseConsecutive2(a, b)(arg) match {
-      case ParserResult.Ok(value, source) =>
-        c(source) match {
-          case ParserResult.Ok(valueb, source) =>
-            ParserResult.Ok(
-              value = (value(0), value(1), valueb),
-              source = source
-            )
-          case default => default.morph()
-        }
-      case default => default.morph()
-    }
+    parseConsecutive2(a, b)(arg).mapOkUp((ab, s) =>
+      c(s).mapOk((c, s) => ((ab._1, ab._2, c), s))
+    )
 
 def parseConsecutive4[A, B, C, D](
     a: Parser[A],
@@ -123,18 +120,11 @@ def parseConsecutive4[A, B, C, D](
     d: Parser[D]
 ): Parser[(A, B, C, D)] =
   (arg: Source) =>
-    parseConsecutive2(a, b)(arg) match {
-      case ParserResult.Ok(value, source) =>
-        parseConsecutive2(c, d)(source) match {
-          case ParserResult.Ok(valueb, source) =>
-            ParserResult.Ok(
-              value = (value(0), value(1), valueb(0), valueb(1)),
-              source = source
-            )
-          case default => default.morph()
-        }
-      case default => default.morph()
-    }
+    parseConsecutive2(a, b)(arg).mapOkUp((ab, s) =>
+      parseConsecutive2(c, d)(s).mapOk((cd, s) =>
+        ((ab(0), ab(1), cd(0), cd(1)), s)
+      )
+    )
 
 def parseConsecutive5[A, B, C, D, E](
     a: Parser[A],
@@ -144,18 +134,11 @@ def parseConsecutive5[A, B, C, D, E](
     e: Parser[E]
 ): Parser[(A, B, C, D, E)] =
   (arg: Source) =>
-    parseConsecutive3(a, b, c)(arg) match {
-      case ParserResult.Ok(value, source) =>
-        parseConsecutive2(d, e)(source) match {
-          case ParserResult.Ok(valueb, source) =>
-            ParserResult.Ok(
-              value = (value(0), value(1), value(2), valueb(0), valueb(1)),
-              source = source
-            )
-          case default => default.morph()
-        }
-      case default => default.morph()
-    }
+    parseConsecutive3(a, b, c)(arg).mapOkUp((abc, s) =>
+      parseConsecutive2(d, e)(s).mapOk((de, s) =>
+        ((abc(0), abc(1), abc(2), de(0), de(1)), s)
+      )
+    )
 
 def parseAnyOf[A](a: Parser[A]*): Parser[A] =
   def anon(arg: Source): ParserResult[A] =
@@ -190,7 +173,8 @@ def parseWhileFollows[A, B](
   def anon(arg: Source): ParserResult[ArrayList[A]] = {
     var nsource = arg
     var res = ArrayList[A]()
-    while (true) {
+    var stop = false
+    while (!stop) {
       parser(nsource) match {
         case ParserResult.Ok(value, source) => {
           res.add(value)
@@ -201,6 +185,7 @@ def parseWhileFollows[A, B](
 
       follows(nsource) match {
         case ParserResult.Ok(value, source) => nsource = source
+        case ParserResult.NoMatch()         => stop = true
         case default                        => return default.morph()
       }
     }
@@ -238,17 +223,15 @@ def parseInit(): Parser[Node] =
       parseExpectToken(TokenValue.Identifier),
       parseExpectTokenAnyOf(TokenValue.Val, TokenValue.Var),
       mustMatch(parseExpression(), "Initialisation expected expression")
-    )(arg) match {
-      case ParserResult.Ok((_, valvar, expr), source) =>
-        ParserResult.Ok(
-          Node(
-            FunctionalAST.Init(valvar.value() == TokenValue.Val, expr),
-            arg.offset()
-          ),
-          source
-        )
-      case default => default.morph()
-    }
+    )(arg).mapOk((tte, s) =>
+      (
+        Node(
+          FunctionalAST.Init(tte(1) == TokenValue.Val, tte(2)),
+          arg.offset()
+        ),
+        s
+      )
+    )
 
 def parseUnaryExpression(): Parser[Node] =
   (arg: Source) =>
@@ -259,13 +242,15 @@ def parseUnaryExpression(): Parser[Node] =
         TokenValue.Not
       ),
       mustMatch(parseExpression(), "Unary prefix requires expression")
-    )(arg) match
-      case ParserResult.Ok((op, expr), source) =>
-        ParserResult.Ok(
-          Node(FunctionalAST.UnaryExpr(op.value(), expr), source.offset()),
-          source
-        )
-      case default => default.morph()
+    )(arg).mapOk((opexpr, source) =>
+      (
+        Node(
+          FunctionalAST.UnaryExpr(opexpr(0).value(), opexpr(1)),
+          source.offset()
+        ),
+        source
+      )
+    )
 
 def parseExtensionMaxWeight(weight: Int): Parser[Node] =
   val operatorWeights = List(
@@ -287,6 +272,10 @@ def parseExtensionMaxWeight(weight: Int): Parser[Node] =
     (TokenValue.Land, 5)
   )
   val possibleOperators = operatorWeights.filter(_(1) < weight).map(_(0))
+  (arg: Source) =>
+    parseExpectTokenAnyOf(possibleOperators*)(arg) match
+      case ParserResult.Ok(token, source) => parseExpression()(arg)
+      case default                        => default.morph()
 
 @main def hello(): Unit =
   println("Hello world!")
